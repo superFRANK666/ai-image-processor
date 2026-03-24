@@ -1,6 +1,6 @@
 [project]
 name = "ai-image-processor"
-version = "1.1.0"
+version = "1.0.0"
 description = "AI全模态影像处理软件 - 一句话调色、图像检索、3D生成"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -86,3 +86,4 @@ python_version = "3.9"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
+

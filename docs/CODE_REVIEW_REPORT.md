@@ -1,6 +1,6 @@
 # 深度代码审查报告 (Code Review Report)
 
-**审查版本**: v1.1.0-dev  
+**审查版本**: v1.0.0  
 **审查日期**: 2025-12-29  
 **审查人**: 高级全栈架构师 (AI Assistant)
 
@@ -207,8 +207,9 @@ pip install -r requirements.txt
 python main.py
 ```
 
-#### 4. 本次优化日志 (Changelog v1.1.0-Review)
+#### 4. 本次优化日志 (Changelog v1.0.0)
 *   **Performance**: 重写了 3D 网格生成算法，从纯 Python 循环迁移至 NumPy 向量化操作，渲染速度提升 100 倍。
 *   **Stability**: 移除了危险的 `QThread.terminate()` 调用，修复了潜在的死锁风险。
 *   **Refactor**: 重构了 `MainWindow`，引入 `ModelManager` 统一管理 AI 模型生命周期，解决了界面卡顿问题。
 *   **Structure**: 规范了项目目录结构，分离了业务逻辑与 UI 实现。
+

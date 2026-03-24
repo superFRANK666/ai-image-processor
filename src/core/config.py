@@ -49,7 +49,7 @@ COLOR_PRESETS = {
 
 
 # 应用程序版本
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.0.0"
 
 # UI配置
 UI_CONFIG = {
@@ -64,3 +64,4 @@ SUPPORTED_FORMATS = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".raw", 
 
 # 3D导出格式
 EXPORT_3D_FORMATS = [".obj", ".gltf", ".glb", ".fbx", ".stl"]
+

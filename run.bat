@@ -6,7 +6,7 @@ setlocal
 cd /d "%~dp0"
 
 echo ========================================
-echo   AI Image Processor v1.1.0
+echo   AI Image Processor v1.0.0
 echo ========================================
 echo.
 
@@ -53,3 +53,4 @@ if errorlevel 1 (
 )
 
 endlocal
+

@@ -1,8 +1,8 @@
-# v1.1.0-dev 优化总结报告
+# v1.0.0 优化总结报告
 
 **优化日期**: 2025-12-29
 **基于**: [代码审查报告](CODE_REVIEW_REPORT.md)
-**版本**: v1.1.0-dev
+**版本**: v1.0.0
 
 ---
 
@@ -230,13 +230,13 @@ def _on_model_loaded(self, model_name: str):
 ### 4. 文档更新
 
 #### 4.1 README.md
-- 添加 v1.1.0-dev 更新说明
+- 添加 v1.0.0 更新说明
 - 完善启动方式文档
 - 推荐使用 `python main.py`
 - 添加启动参数说明
 
 #### 4.2 CHANGELOG.md
-- 新增 v1.1.0-dev 变更日志
+- 新增 v1.0.0 变更日志
 - 详细记录所有优化内容
 
 #### 4.3 本文档
@@ -299,7 +299,7 @@ def _on_model_loaded(self, model_name: str):
 
 - [x] 代码优化完成
 - [x] 文档更新完成
-- [x] 版本号更新 (`__version__ = "1.1.0-dev"`)
+- [x] 版本号更新 (`__version__ = "1.0.0"`)
 - [ ] 单元测试通过 (待添加)
 - [ ] 回归测试通过
 - [ ] 性能基准测试通过
@@ -311,7 +311,7 @@ def _on_model_loaded(self, model_name: str):
 
 根据代码审查报告的建议,以下是未来版本的优化方向:
 
-### v1.2.0 (计划)
+### v1.0.0 (计划)
 1. **项目结构重组**
    - 按照报告建议的"功能模块 + 分层架构"重组
    - `ai` → `infrastructure/ai_models`
@@ -351,3 +351,4 @@ def _on_model_loaded(self, model_name: str):
 ---
 
 *文档生成时间: 2025-12-29*
+

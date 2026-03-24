@@ -5,7 +5,7 @@
 cd "$(dirname "$0")"
 
 echo "========================================"
-echo "  AI Image Processor v1.1.0"
+echo "  AI Image Processor v1.0.0"
 echo "========================================"
 echo
 
@@ -48,3 +48,4 @@ if [ $? -ne 0 ]; then
     echo "       python3 scripts/download_all_models.py"
     echo
 fi
+
