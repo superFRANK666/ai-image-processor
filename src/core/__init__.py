@@ -1,0 +1,28 @@
+"""
+核心模块初始化
+"""
+from .config import (
+    PROJECT_ROOT,
+    DATA_DIR,
+    MODELS_DIR,
+    RESOURCES_DIR,
+    IMAGE_INDEX_DIR,
+    MODEL_CONFIG,
+    COLOR_PRESETS,
+    UI_CONFIG,
+    SUPPORTED_FORMATS,
+    EXPORT_3D_FORMATS,
+)
+
+__all__ = [
+    'PROJECT_ROOT',
+    'DATA_DIR',
+    'MODELS_DIR',
+    'RESOURCES_DIR',
+    'IMAGE_INDEX_DIR',
+    'MODEL_CONFIG',
+    'COLOR_PRESETS',
+    'UI_CONFIG',
+    'SUPPORTED_FORMATS',
+    'EXPORT_3D_FORMATS',
+]

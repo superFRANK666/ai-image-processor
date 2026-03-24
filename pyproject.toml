@@ -1,0 +1,88 @@
+[project]
+name = "ai-image-processor"
+version = "1.1.0"
+description = "AI全模态影像处理软件 - 一句话调色、图像检索、3D生成"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "AI Image Processor Team"}
+]
+keywords = ["image-processing", "ai", "color-grading", "3d", "deep-learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Multimedia :: Graphics :: Editors",
+]
+
+dependencies = [
+    "PySide6>=6.6.0",
+    "numpy>=1.24.0",
+    "opencv-python>=4.8.0",
+    "Pillow>=10.0.0",
+    "scikit-image>=0.22.0",
+    "pyyaml>=6.0",
+    "loguru>=0.7.0",
+    "onnxruntime>=1.16.0",
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    "transformers>=4.35.0",
+    "sentence-transformers>=2.2.0",
+    "timm>=0.9.0",
+    "chromadb>=0.4.0",
+    "open3d>=0.18.0",
+    "trimesh>=4.0.0",
+    "pycocotools>=2.0.7",
+    "psutil>=5.9.0",
+    "tqdm>=4.66.0",
+    "imageio>=2.31.0",
+    "imageio-ffmpeg>=0.4.9",
+    "requests>=2.31.0",
+    "huggingface-hub>=0.20.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "onnxruntime-gpu>=1.16.0",
+]
+llm = [
+    "accelerate>=0.26.0",
+    "bitsandbytes>=0.43.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+ai-image-processor = "main:main"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src", "src.*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

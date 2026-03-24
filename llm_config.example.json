@@ -1,0 +1,100 @@
+{
+  "_comment": "LLM配置文件示例 - 包含多种配置方案",
+  "_instructions": [
+    "将下面的某个配置复制到 llm_config.json 文件中使用",
+    "根据您的硬件情况选择合适的配置",
+    "建议:",
+    "  - 8GB显存以下: 使用1.5B模型或4-bit量化的7B模型",
+    "  - 8-16GB显存: 使用7B模型(4-bit量化)或3B模型",
+    "  - 16GB+显存: 使用7B模型(8-bit量化)或14B模型(4-bit)"
+  ],
+  "示例1_最小配置_1.5B模型": {
+    "enabled": true,
+    "model_name": "Qwen/Qwen2.5-1.5B-Instruct",
+    "device": "auto"
+  },
+  "示例2_3B模型_无量化": {
+    "enabled": true,
+    "model_name": "Qwen/Qwen2.5-3B-Instruct",
+    "device": "auto"
+  },
+  "示例3_7B模型_4bit量化_推荐": {
+    "enabled": true,
+    "model_name": "Qwen/Qwen2.5-7B-Instruct",
+    "device": "auto",
+    "quantization": {
+      "enabled": true,
+      "bits": 4,
+      "compute_dtype": "float16"
+    }
+  },
+  "示例4_7B模型_8bit量化": {
+    "enabled": true,
+    "model_name": "Qwen/Qwen2.5-7B-Instruct",
+    "device": "auto",
+    "quantization": {
+      "enabled": true,
+      "bits": 8,
+      "compute_dtype": "float16"
+    }
+  },
+  "示例5_14B模型_4bit量化": {
+    "enabled": true,
+    "model_name": "Qwen/Qwen2.5-14B-Instruct",
+    "device": "auto",
+    "quantization": {
+      "enabled": true,
+      "bits": 4,
+      "compute_dtype": "float16"
+    },
+    "max_memory": {
+      "0": "10GB",
+      "cpu": "20GB"
+    }
+  },
+  "示例6_32B模型_4bit量化_大显存": {
+    "enabled": true,
+    "model_name": "Qwen/Qwen2.5-32B-Instruct",
+    "device": "auto",
+    "quantization": {
+      "enabled": true,
+      "bits": 4,
+      "compute_dtype": "bfloat16"
+    },
+    "max_memory": {
+      "0": "20GB",
+      "cpu": "40GB"
+    },
+    "offload_folder": "./model_offload"
+  },
+  "示例7_本地模型路径": {
+    "enabled": true,
+    "model_name": "/path/to/models/Qwen2.5-7B-Instruct",
+    "device": "cuda",
+    "quantization": {
+      "enabled": true,
+      "bits": 4,
+      "compute_dtype": "float16"
+    }
+  },
+  "示例8_CPU运行_仅供测试": {
+    "enabled": true,
+    "model_name": "Qwen/Qwen2.5-1.5B-Instruct",
+    "device": "cpu"
+  },
+  "示例9_禁用LLM_使用关键词匹配": {
+    "enabled": false
+  },
+  "_参数说明": {
+    "enabled": "是否启用LLM功能，false时使用传统关键词匹配",
+    "model_name": "模型名称(HuggingFace格式)或本地路径",
+    "device": "设备选择: auto(自动), cuda(GPU), cpu(CPU)",
+    "quantization": {
+      "enabled": "是否启用量化",
+      "bits": "量化位数: 4(占用更少显存) 或 8(精度更高)",
+      "compute_dtype": "计算精度: float16(兼容性好) 或 bfloat16(新GPU推荐)"
+    },
+    "max_memory": "最大内存限制，格式: {'0': '10GB', 'cpu': '20GB'}",
+    "offload_folder": "CPU卸载文件夹，用于超大模型的部分层卸载到CPU"
+  }
+}
