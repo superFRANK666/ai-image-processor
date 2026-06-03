@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -106,6 +107,17 @@ class ColorPanelRegressionTests(unittest.TestCase):
             dialog._show_thumbnails(results)
             self.assertEqual(len(dialog._thumbnails), 1)
             self.assertIsNotNone(dialog.thumbnail_layout.itemAtPosition(0, 0))
+
+    def test_agi_exports_warn_when_animation_is_missing(self):
+        from PySide6.QtWidgets import QMessageBox
+        from src.ui.agi_camera_panel import AGICameraPanel
+
+        panel = AGICameraPanel()
+        with mock.patch.object(QMessageBox, "warning") as warning:
+            panel._export_gif()
+            panel._export_video()
+
+        self.assertEqual(warning.call_count, 2)
 
 
 if __name__ == "__main__":

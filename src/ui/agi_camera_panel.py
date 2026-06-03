@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QSlider, QComboBox, QSpinBox, QDoubleSpinBox,
     QFrame, QProgressBar, QFileDialog, QCheckBox, QSizePolicy,
-    QScrollArea
+    QScrollArea, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QEvent
 from PySide6.QtGui import QPixmap, QImage, QMouseEvent, QPainter, QColor, QPen
@@ -836,16 +836,22 @@ class AGICameraPanel(QWidget):
     def _export_model(self):
         """导出3D模型"""
         if self._mesh is None:
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "提示", "请先生成3D模型")
             return
 
         # 发射信号给主窗口处理
         self.export_3d_model_requested.emit()
 
+    def _has_animation_frames(self) -> bool:
+        """检查是否已有可导出的动画帧。"""
+        if not self._frames:
+            QMessageBox.warning(self, "提示", "请先生成旋转动画")
+            return False
+        return True
+
     def _export_gif(self):
         """导出GIF"""
-        if not self._frames:
+        if not self._has_animation_frames():
             return
 
         file_path, _ = QFileDialog.getSaveFileName(
@@ -855,14 +861,20 @@ class AGICameraPanel(QWidget):
         if file_path:
             try:
                 import imageio
+            except ImportError:
+                QMessageBox.warning(self, "导出失败", "缺少 imageio，无法导出 GIF")
+                return
+
+            try:
                 rgb_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in self._frames]
                 imageio.mimsave(file_path, rgb_frames, fps=self.fps_spin.value(), loop=0)
-            except ImportError:
-                pass
+                QMessageBox.information(self, "导出完成", f"GIF 已导出:\n{file_path}")
+            except Exception as e:
+                QMessageBox.warning(self, "导出失败", f"无法导出 GIF:\n{e}")
 
     def _export_video(self):
         """导出视频"""
-        if not self._frames:
+        if not self._has_animation_frames():
             return
 
         file_path, _ = QFileDialog.getSaveFileName(
@@ -870,14 +882,24 @@ class AGICameraPanel(QWidget):
         )
 
         if file_path:
-            h, w = self._frames[0].shape[:2]
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(file_path, fourcc, self.fps_spin.value(), (w, h))
+            out = None
+            try:
+                h, w = self._frames[0].shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out = cv2.VideoWriter(file_path, fourcc, self.fps_spin.value(), (w, h))
+                if not out.isOpened():
+                    QMessageBox.warning(self, "导出失败", "视频编码器不可用，无法写入文件")
+                    return
 
-            for frame in self._frames:
-                out.write(frame)
+                for frame in self._frames:
+                    out.write(frame)
 
-            out.release()
+                QMessageBox.information(self, "导出完成", f"视频已导出:\n{file_path}")
+            except Exception as e:
+                QMessageBox.warning(self, "导出失败", f"无法导出视频:\n{e}")
+            finally:
+                if out is not None:
+                    out.release()
 
     def _on_add_views(self):
         """添加多视角图片"""
