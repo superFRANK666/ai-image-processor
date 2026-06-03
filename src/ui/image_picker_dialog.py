@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QImage
 
+from .ui_utils import fit_thumbnail_size
+
 # 类型检查时导入
 if TYPE_CHECKING:
     from ..ai import ImageIndexDatabase
@@ -76,8 +78,7 @@ class SelectableImageThumbnail(QWidget):
             if image is not None:
                 # 保持比例缩放
                 h, w = image.shape[:2]
-                scale = size / max(h, w)
-                new_w, new_h = int(w * scale), int(h * scale)
+                new_w, new_h = fit_thumbnail_size(w, h, size)
                 image = cv2.resize(image, (new_w, new_h))
 
                 rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)

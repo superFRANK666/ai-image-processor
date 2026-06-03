@@ -25,6 +25,7 @@ from PySide6.QtGui import QIcon, QPixmap, QImage, QAction, QCursor
 from ..ai import ImageIndexDatabase
 from ..core.config import SUPPORTED_FORMATS
 from .image_picker_dialog import pick_images
+from .ui_utils import fit_thumbnail_size
 
 class ThumbnailLoader(QThread):
     """后台加载缩略图线程"""
@@ -50,8 +51,7 @@ class ThumbnailLoader(QThread):
                 if image is not None:
                     # 调整大小
                     h, w = image.shape[:2]
-                    scale = self.icon_size / max(h, w)
-                    new_w, new_h = int(w * scale), int(h * scale)
+                    new_w, new_h = fit_thumbnail_size(w, h, self.icon_size)
                     image = cv2.resize(image, (new_w, new_h))
                     
                     # 转 RGB

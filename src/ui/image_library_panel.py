@@ -18,6 +18,7 @@ from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtGui import QPixmap, QImage, QCursor
 
 from .image_picker_dialog import pick_images
+from .ui_utils import fit_thumbnail_size
 
 # 类型检查时导入（不影响运行时）
 if TYPE_CHECKING:
@@ -80,8 +81,7 @@ class ImageThumbnailWidget(QWidget):
             if image is not None:
                 # 保持比例缩放并裁剪/填充到正方形
                 h, w = image.shape[:2]
-                scale = size / max(h, w)
-                new_w, new_h = int(w * scale), int(h * scale)
+                new_w, new_h = fit_thumbnail_size(w, h, size)
                 image = cv2.resize(image, (new_w, new_h))
                 
                 rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
