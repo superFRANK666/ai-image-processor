@@ -33,6 +33,26 @@ class ColorPanelRegressionTests(unittest.TestCase):
         panel.reset_btn.click()
         self.assertEqual(len(emitted), 1)
 
+    def test_preset_submission_does_not_override_external_busy_state(self):
+        from PySide6.QtCore import QEventLoop, QTimer
+        from src.ui.color_grading_panel import ColorGradingPanel
+
+        panel = ColorGradingPanel()
+
+        def mark_busy(_text):
+            panel.apply_btn.setText("分析中...")
+            panel.apply_btn.setEnabled(False)
+
+        panel.text_input_submitted.connect(mark_busy)
+        panel.preset_combo.setCurrentText("电影感")
+
+        loop = QEventLoop()
+        QTimer.singleShot(650, loop.quit)
+        loop.exec()
+
+        self.assertEqual(panel.apply_btn.text(), "分析中...")
+        self.assertFalse(panel.apply_btn.isEnabled())
+
     def test_thumbnail_size_never_rounds_down_to_zero(self):
         from src.ui.ui_utils import fit_thumbnail_size
 

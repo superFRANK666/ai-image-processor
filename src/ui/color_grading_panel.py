@@ -306,28 +306,14 @@ class ColorGradingPanel(QWidget):
         if preset and preset != "选择预设...":
             # 设置输入框文本
             self.text_input.setText(preset)
-            
-            # 临时改变按钮文字显示正在处理
-            original_text = self.apply_btn.text()
-            self.apply_btn.setText("处理中...")
-            self.apply_btn.setEnabled(False)
-            
+
             # 发送信号
             self.text_input_submitted.emit(preset)
-            
-            # 恢复按钮状态
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(500, lambda: self._restore_apply_button(original_text))
-            
+
             # 重置下拉框到默认选项，允许再次选择同一预设
             self.preset_combo.blockSignals(True)
             self.preset_combo.setCurrentIndex(0)
             self.preset_combo.blockSignals(False)
-    
-    def _restore_apply_button(self, text: str):
-        """恢复应用按钮状态"""
-        self.apply_btn.setText(text)
-        self.apply_btn.setEnabled(True)
 
     def _on_param_changed(self, value: float):
         """参数改变 - 使用防抖机制"""
