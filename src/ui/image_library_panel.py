@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QGridLayout, QLineEdit, QMenu, QComboBox, QInputDialog
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtGui import QPixmap, QImage, QCursor
 
 from .image_picker_dialog import pick_images
@@ -143,6 +143,40 @@ class ImageThumbnailWidget(QWidget):
             self.name_label.setToolTip(self.img_name)
 
 
+class RebuildIndexThread(QThread):
+    """后台重建图像语义索引。"""
+
+    progress = Signal(int, int)
+    rebuild_finished = Signal(int)
+    rebuild_failed = Signal(str)
+    rebuild_canceled = Signal()
+
+    def __init__(self, image_db):
+        super().__init__()
+        self.image_db = image_db
+        self._stop_requested = False
+
+    def request_stop(self):
+        self._stop_requested = True
+
+    def run(self):
+        try:
+            def update_progress(current, total):
+                if self._stop_requested:
+                    raise InterruptedError("用户取消")
+                self.progress.emit(current, total)
+
+            rebuilt = self.image_db.rebuild_all_indexes(progress_callback=update_progress)
+            if self._stop_requested:
+                self.rebuild_canceled.emit()
+            else:
+                self.rebuild_finished.emit(rebuilt)
+        except InterruptedError:
+            self.rebuild_canceled.emit()
+        except Exception as e:
+            self.rebuild_failed.emit(str(e))
+
+
 class ImageLibraryPanel(QWidget):
     """图像库面板"""
 
@@ -152,6 +186,8 @@ class ImageLibraryPanel(QWidget):
     def __init__(self, image_db: Optional["ImageIndexDatabase"] = None):
         super().__init__()
         self.image_db = image_db
+        self._rebuild_thread: Optional[RebuildIndexThread] = None
+        self._rebuild_progress = None
         self._thumbnails: List[ImageThumbnailWidget] = []
         self._setup_ui()
 
@@ -556,10 +592,12 @@ class ImageLibraryPanel(QWidget):
     def _on_rebuild_index(self):
         """重建所有图片的语义索引"""
         from PySide6.QtWidgets import QMessageBox, QProgressDialog
-        from PySide6.QtCore import Qt
 
         if not self.image_db:
             QMessageBox.warning(self, "错误", "图像库未初始化")
+            return
+        if self._rebuild_thread is not None and self._rebuild_thread.isRunning():
+            self.status_label.setText("索引正在重建中")
             return
 
         # 确认
@@ -584,35 +622,66 @@ class ImageLibraryPanel(QWidget):
             progress.setWindowTitle("重建索引")
             progress.setWindowModality(Qt.WindowModal)
             progress.setMinimumDuration(0)
+            progress.setAutoClose(False)
+            progress.setAutoReset(False)
 
-            def update_progress(current, total):
+            worker = RebuildIndexThread(self.image_db)
+            self._rebuild_thread = worker
+            self._rebuild_progress = progress
+
+            def update_progress(current: int, total: int):
+                if progress.maximum() != total:
+                    progress.setMaximum(total)
                 progress.setValue(current)
                 progress.setLabelText(f"正在处理: {current}/{total}")
-                from PySide6.QtWidgets import QApplication
-                QApplication.processEvents()
-                if progress.wasCanceled():
-                    raise InterruptedError("用户取消")
 
-            # 执行重建
-            rebuilt = self.image_db.rebuild_all_indexes(progress_callback=update_progress)
+            def handle_finished(rebuilt: int):
+                QMessageBox.information(
+                    self, "完成",
+                    f"索引重建完成！\n成功处理 {rebuilt} 张图片。\n\n"
+                    "现在可以使用中文语义搜索了，例如搜索\"杯子\"、\"风景\"等。"
+                )
+                self.refresh()
 
-            progress.close()
+            def handle_canceled():
+                self.status_label.setText("索引重建已取消")
 
-            QMessageBox.information(
-                self, "完成",
-                f"索引重建完成！\n成功处理 {rebuilt} 张图片。\n\n"
-                "现在可以使用中文语义搜索了，例如搜索\"杯子\"、\"风景\"等。"
-            )
+            def handle_failed(message: str):
+                QMessageBox.critical(self, "错误", f"重建索引失败: {message}")
 
-            self.refresh()
+            def cleanup():
+                self.rebuild_btn.setEnabled(True)
+                self.rebuild_btn.setText("重建索引")
+                if self._rebuild_progress is progress:
+                    progress.close()
+                    progress.deleteLater()
+                    self._rebuild_progress = None
+                if self._rebuild_thread is worker:
+                    self._rebuild_thread = None
+                worker.deleteLater()
 
-        except InterruptedError:
-            self.status_label.setText("索引重建已取消")
+            progress.canceled.connect(worker.request_stop)
+            worker.progress.connect(update_progress)
+            worker.rebuild_finished.connect(handle_finished)
+            worker.rebuild_canceled.connect(handle_canceled)
+            worker.rebuild_failed.connect(handle_failed)
+            worker.finished.connect(cleanup)
+            worker.start()
+
         except Exception as e:
             QMessageBox.critical(self, "错误", f"重建索引失败: {e}")
-        finally:
             self.rebuild_btn.setEnabled(True)
             self.rebuild_btn.setText("重建索引")
+
+    def closeEvent(self, event):
+        """关闭面板时等待索引重建线程自然退出。"""
+        if self._rebuild_thread is not None and self._rebuild_thread.isRunning():
+            self._rebuild_thread.request_stop()
+            if not self._rebuild_thread.wait(5000):
+                self.status_label.setText("索引仍在重建中，暂不能关闭")
+                event.ignore()
+                return
+        super().closeEvent(event)
 
     def _on_import_btn_clicked(self):
         """导入按钮点击"""

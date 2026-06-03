@@ -118,6 +118,7 @@ This repository currently has no formal automated test suite.
 Recommended validation commands:
 ```bash
 python -m compileall -q main.py src scripts
+python -m unittest discover -s tests
 python main.py --check-deps
 ```
 

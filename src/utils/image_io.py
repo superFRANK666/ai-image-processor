@@ -54,7 +54,11 @@ def imwrite(filepath: str, image: np.ndarray) -> bool:
         # 确保目录存在
         Path(filepath).parent.mkdir(parents=True, exist_ok=True)
 
-        _, img_encoded = cv2.imencode(ext, image)
+        ok, img_encoded = cv2.imencode(ext, image)
+        if not ok or img_encoded is None:
+            print(f"保存图像失败 {filepath}: 不支持的格式或编码失败")
+            return False
+
         img_encoded.tofile(filepath)
         return True
     except Exception as e:

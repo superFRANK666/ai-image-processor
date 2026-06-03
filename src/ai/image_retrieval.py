@@ -282,6 +282,10 @@ class ImageFeatureExtractor:
             models_to_try.append(("online", MULTILINGUAL_CLIP_MODELS["english"]))
 
         for source, model_path in models_to_try:
+            env_snapshot = {
+                "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE"),
+                "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE"),
+            }
             try:
                 print(f"尝试加载CLIP模型: {model_path} ({source})")
 
@@ -309,6 +313,12 @@ class ImageFeatureExtractor:
                 logger.error(f"模型加载失败 ({model_path}): {e}")
                 print(f"模型加载失败 ({model_path}): {e}")
                 continue
+            finally:
+                for env_name, original_value in env_snapshot.items():
+                    if original_value is None:
+                        os.environ.pop(env_name, None)
+                    else:
+                        os.environ[env_name] = original_value
 
         print("所有CLIP模型加载失败, 将使用传统特征提取")
         self.model = None
@@ -712,7 +722,7 @@ class ImageIndexDatabase:
         rebuilt = 0
         for i, img_info in enumerate(all_images):
             try:
-                image = cv2.imread(img_info["path"])
+                image = imread_safe(img_info["path"])
                 if image is None:
                     continue
 
@@ -781,6 +791,10 @@ class ImageIndexDatabase:
             similar_images = []
             for i, image_id in enumerate(results['ids'][0]):
                 metadata = results['metadatas'][0][i]
+                if image_id.startswith("__group__") or metadata.get("__is_group_marker__") == "true":
+                    continue
+                if not metadata.get("path"):
+                    continue
                 distance = results['distances'][0][i] if 'distances' in results else 0
 
                 similar_images.append({
@@ -802,19 +816,28 @@ class ImageIndexDatabase:
 
         similarities = []
         for item in self.memory_index:
+            metadata = item.get("metadata", {})
+            if item["id"].startswith("__group__"):
+                continue
+            if metadata.get("__is_group_marker__") == "true":
+                continue
+            if not metadata.get("path"):
+                continue
             sim = np.dot(query_embedding, item["embedding"])
             similarities.append((sim, item))
 
         similarities.sort(key=lambda x: x[0], reverse=True)
 
         results = []
-        for sim, item in similarities[:top_k]:
+        for sim, item in similarities:
             results.append({
                 "id": item["id"],
                 "path": item["metadata"].get("path", ""),
                 "similarity": float(sim),
                 "metadata": item["metadata"]
             })
+            if len(results) >= top_k:
+                break
 
         return results
 
@@ -1384,8 +1407,30 @@ class ImageIndexDatabase:
     def get_image_count(self) -> int:
         """获取索引中的图像数量"""
         if self.collection is not None:
-            return self.collection.count()
-        return len(self.memory_index)
+            try:
+                results = self.collection.get(include=['metadatas'])
+                if not results or not results.get('ids'):
+                    return 0
+                count = 0
+                for i, image_id in enumerate(results['ids']):
+                    metadata = results['metadatas'][i]
+                    if image_id.startswith("__group__"):
+                        continue
+                    if metadata.get("__is_group_marker__") == "true":
+                        continue
+                    if not metadata.get("path"):
+                        continue
+                    count += 1
+                return count
+            except Exception as e:
+                print(f"获取图像数量失败: {e}")
+                return 0
+        return len([
+            item for item in self.memory_index
+            if not item["id"].startswith("__group__")
+            and item["metadata"].get("__is_group_marker__") != "true"
+            and item["metadata"].get("path")
+        ])
 
     def get_all_images(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """
@@ -1414,6 +1459,12 @@ class ImageIndexDatabase:
                     if ids is not None and len(ids) > 0:
                         for i, image_id in enumerate(ids):
                             metadata = results['metadatas'][i]
+                            if image_id.startswith("__group__"):
+                                continue
+                            if metadata.get("__is_group_marker__") == "true":
+                                continue
+                            if not metadata.get("path"):
+                                continue
                             
                             embedding_val = None
                             embeddings = results.get('embeddings')
@@ -1432,10 +1483,16 @@ class ImageIndexDatabase:
                 return []
         else:
             # 内存索引分页
+            filtered = [
+                item for item in self.memory_index
+                if not item["id"].startswith("__group__")
+                and item["metadata"].get("__is_group_marker__") != "true"
+                and item["metadata"].get("path")
+            ]
             start = offset
-            end = min(offset + limit, len(self.memory_index))
+            end = min(offset + limit, len(filtered))
             results = []
-            for item in self.memory_index[start:end]:
+            for item in filtered[start:end]:
                 results.append({
                     "id": item["id"],
                     "path": item["metadata"].get("path", ""),

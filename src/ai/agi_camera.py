@@ -32,6 +32,9 @@ try:
     from transformers import AutoImageProcessor, AutoModelForDepthEstimation
     HAS_TRANSFORMERS = True
 except ImportError:
+    torch = None
+    AutoImageProcessor = None
+    AutoModelForDepthEstimation = None
     HAS_TRANSFORMERS = False
 
 # MobileSAM 分割模型支持
@@ -45,6 +48,15 @@ except ImportError:
 # 导入几何工具类 (使用相对导入)
 from ..utils.geometry_utils import GeometryUtils
 
+
+def _safe_torch_load(path: Path, map_location=None):
+    """Load tensor checkpoints with a restricted unpickler when PyTorch supports it."""
+    if torch is None:
+        raise RuntimeError("PyTorch is not available")
+    try:
+        return torch.load(str(path), map_location=map_location, weights_only=True)
+    except TypeError:
+        return torch.load(str(path), map_location=map_location)
 
 
 @dataclass
@@ -126,7 +138,7 @@ class ObjectSegmenter:
     def _load_sam_checkpoint(self, model_path: Path):
         """直接加载SAM checkpoint（不依赖mobile_sam包）"""
         # 这是一个简化的加载方式，当mobile_sam包不可用时使用
-        checkpoint = torch.load(str(model_path), map_location=self.device)
+        checkpoint = _safe_torch_load(model_path, map_location=self.device)
         print(f"SAM checkpoint 加载成功，包含 {len(checkpoint)} 个键")
         # 注意：完整功能需要mobile_sam包
 
@@ -518,7 +530,13 @@ class DepthEstimator:
         self.session = None  # ONNX session
         self.depth_model = None  # Transformers model
         self.image_processor = None
-        self.device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu" if HAS_TRANSFORMERS else None
+        self.device = (
+            "cuda"
+            if HAS_TRANSFORMERS and use_gpu and torch is not None and torch.cuda.is_available()
+            else "cpu"
+            if HAS_TRANSFORMERS
+            else None
+        )
         self.input_size = (518, 518)  # Depth Anything default
 
         self._load_model()

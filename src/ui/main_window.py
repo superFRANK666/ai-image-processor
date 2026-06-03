@@ -55,7 +55,7 @@ class ProcessingThread(QThread):
             result = self.func(*self.args, **self.kwargs)
             if not self._stop_requested:
                 self.finished.emit(result)
-        except (RuntimeError, ValueError, OSError, ImportError) as e:
+        except Exception as e:
             # 捕获常见的应用程序错误,不捕获系统信号
             if not self._stop_requested:
                 self.error.emit(str(e))
@@ -68,6 +68,11 @@ class ProcessingThread(QThread):
     def request_stop(self):
         """请求线程停止"""
         self._stop_requested = True
+
+    @property
+    def stop_requested(self) -> bool:
+        """是否已请求停止。"""
+        return self._stop_requested
 
 
 class MainWindow(QMainWindow):
@@ -175,8 +180,9 @@ class MainWindow(QMainWindow):
         if not self.image_db:
             self.image_db = self.model_manager.get_model('image_db')
             if not self.image_db:
-                self.model_manager.load_model_sync('image_db')
-                self.image_db = self.model_manager.get_model('image_db')
+                self.image_db = self.model_manager.load_model_sync('image_db')
+        if not self.image_db:
+            raise RuntimeError("图像数据库未加载，无法创建风格分析器")
         return StyleAnalyzer(self.image_db.feature_extractor)
 
     def _on_loading_started(self, model_name: str):
@@ -227,24 +233,33 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "模型加载失败", f"加载 {model_name} 时出错:\n{error_msg}")
         self.statusbar.showMessage(f"加载 {model_name} 失败", 3000)
 
-    def _ensure_model(self, model_name: str):
+    def _ensure_model(self, model_name: str) -> bool:
         """确保模型已加载（同步方式,会阻塞）"""
         if not self.model_manager.is_loaded(model_name):
             self.model_manager.load_model_sync(model_name)
 
         # 同步加载后手动更新实例引用(因为同步加载不会触发信号)
         model = self.model_manager.get_model(model_name)
-        if model:
-            if model_name == 'color_engine':
-                self.color_engine = model
-            elif model_name == 'nlp_parser':
-                self.nlp_parser = model
-            elif model_name == 'agi_camera':
-                self.agi_camera = model
-            elif model_name == 'image_db':
-                self.image_db = model
-            elif model_name == 'style_analyzer':
-                self.style_analyzer = model
+        if not model:
+            self.statusbar.showMessage(f"模型 {model_name} 加载失败", 3000)
+            return False
+
+        if model_name == 'color_engine':
+            self.color_engine = model
+        elif model_name == 'nlp_parser':
+            self.nlp_parser = model
+        elif model_name == 'agi_camera':
+            self.agi_camera = model
+        elif model_name == 'image_db':
+            self.image_db = model
+            if hasattr(self, 'library_panel'):
+                self.library_panel.set_database(self.image_db)
+            if hasattr(self, 'agi_panel'):
+                self.agi_panel.set_database(self.image_db)
+        elif model_name == 'style_analyzer':
+            self.style_analyzer = model
+
+        return True
 
     def _ensure_model_async(self, model_name: str):
         """确保模型已加载（异步方式,不阻塞）"""
@@ -535,8 +550,11 @@ class MainWindow(QMainWindow):
             return
 
         if self.current_file_path:
-            imwrite_safe(self.current_file_path, self.current_image)
-            self.statusbar.showMessage("图像已保存", 3000)
+            if imwrite_safe(self.current_file_path, self.current_image):
+                self.statusbar.showMessage("图像已保存", 3000)
+            else:
+                QMessageBox.warning(self, "保存失败", "无法保存图像，请检查路径、格式或权限")
+                self.statusbar.showMessage("图像保存失败", 3000)
         else:
             self.save_image_as()
 
@@ -551,9 +569,12 @@ class MainWindow(QMainWindow):
         )
 
         if file_path:
-            imwrite_safe(file_path, self.current_image)
-            self.current_file_path = file_path
-            self.statusbar.showMessage("图像已保存", 3000)
+            if imwrite_safe(file_path, self.current_image):
+                self.current_file_path = file_path
+                self.statusbar.showMessage("图像已保存", 3000)
+            else:
+                QMessageBox.warning(self, "保存失败", "无法保存图像，请检查路径、格式或权限")
+                self.statusbar.showMessage("图像保存失败", 3000)
 
     def undo(self):
         """撤销操作 - 返回上一步状态"""
@@ -627,47 +648,55 @@ class MainWindow(QMainWindow):
     #     else:
     #         self.library_dock.hide()
 
-    def _wait_for_thread(self):
+    def _wait_for_thread(self) -> bool:
         """
         等待当前线程完成
 
         安全地等待工作线程结束,不使用危险的terminate()
         如果线程无法正常结束,记录警告但不强制终止
         """
-        if self.thread is not None and self.thread.isRunning():
+        if self.thread is None:
+            return True
+
+        if not self.thread.isRunning():
+            self.thread.deleteLater()
+            self.thread = None
+            return True
+
+        if self.thread.isRunning():
             print("[MainWindow] 等待旧线程完成...")
             self.thread.request_stop()  # 请求停止
 
             # 增加等待时间到10秒,给线程足够时间清理资源
             if not self.thread.wait(10000):  # 最多等待10秒
                 print("[MainWindow] 警告: 线程等待超时")
-                print("[MainWindow] 线程仍在运行,将在后台继续执行")
-                # 不使用terminate(),让线程自然结束
-                # 如果线程持有资源,强制终止会导致资源泄漏或死锁
-
-                # 标记线程为孤立状态,不再管理它
-                self.thread.setParent(None)
-                self.thread = None
-                return
+                self.statusbar.showMessage("已有任务仍在运行，请稍后再试", 5000)
+                return False
 
             self.thread.deleteLater()  # 标记为稍后删除
             self.thread = None
+
+        return True
 
     def apply_color_grading(self, params):
         """应用调色参数"""
         if self.original_image is None:
             return
 
+        # 懒加载调色引擎
+        if not self._ensure_model('color_engine'):
+            QMessageBox.warning(self, "模型不可用", "调色引擎加载失败")
+            return
+
+        if not self._wait_for_thread():
+            return
+
         # 保存当前状态到历史记录（在应用新调色前）
         self._save_history()
-
-        # 懒加载调色引擎
-        self._ensure_model('color_engine')
 
         # 保存待应用的参数，用于完成后更新
         self._pending_params = params
 
-        self._wait_for_thread()
         self.progress_bar.show()
         self.progress_bar.setRange(0, 0)  # 不确定进度
 
@@ -702,8 +731,12 @@ class MainWindow(QMainWindow):
             return
 
         # 懒加载NLP解析器和调色引擎
-        self._ensure_model('nlp_parser')
-        self._ensure_model('color_engine')
+        if not self._ensure_model('nlp_parser'):
+            QMessageBox.warning(self, "模型不可用", "语义解析器加载失败")
+            return
+        if not self._ensure_model('color_engine'):
+            QMessageBox.warning(self, "模型不可用", "调色引擎加载失败")
+            return
 
         # 状态反馈
         self.statusbar.showMessage(f"正在分析调色指令: {text[:30]}...")
@@ -780,16 +813,24 @@ class MainWindow(QMainWindow):
         if not file_paths:
             return
 
-        self._ensure_model('image_db')
-        self._wait_for_thread()
+        if not self._ensure_model('image_db'):
+            QMessageBox.warning(self, "模型不可用", "图像数据库加载失败")
+            return
+        if not self._wait_for_thread():
+            return
         
         self.progress_bar.show()
         self.progress_bar.setRange(0, len(file_paths))
         self.statusbar.showMessage(f"准备导入 {len(file_paths)} 张图片到分组 '{group}'...")
 
+        worker = None
+
         def process_import():
             success_count = 0
             for i, path in enumerate(file_paths):
+                if worker and worker.stop_requested:
+                    print("[MainWindow] 导入线程接收到取消请求，提前中断")
+                    break
                 try:
                     self.image_db.add_image(path, group=group)
                     success_count += 1
@@ -797,18 +838,22 @@ class MainWindow(QMainWindow):
                     # 捕获文件和数据库相关错误
                     print(f"导入失败 {path}: {e}")
                 
-                if self.thread:
-                    self.thread.progress.emit(i + 1)
+                if worker:
+                    worker.progress.emit(i + 1)
             return success_count
 
-        self.thread = ProcessingThread(process_import)
-        self.thread.progress.connect(self.progress_bar.setValue)
-        self.thread.finished.connect(lambda n: self._on_import_finished(n))
-        self.thread.start()
+        worker = ProcessingThread(process_import)
+        self.thread = worker
+        worker.progress.connect(self.progress_bar.setValue)
+        worker.finished.connect(lambda n: self._on_import_finished(n))
+        worker.error.connect(self._on_processing_error)
+        worker.start()
 
     def open_library_manager(self):
         """打开图像库管理器"""
-        self._ensure_model('image_db')
+        if not self._ensure_model('image_db'):
+            QMessageBox.warning(self, "模型不可用", "图像数据库加载失败")
+            return
         dialog = LibraryManagerDialog(self.image_db, self)
         # 连接导入信号
         dialog.import_requested.connect(self.import_images)
@@ -832,7 +877,9 @@ class MainWindow(QMainWindow):
             return
             
         # 1. 风格分析
-        self._ensure_model('style_analyzer')
+        if not self._ensure_model('style_analyzer'):
+            QMessageBox.warning(self, "模型不可用", "风格分析模型加载失败")
+            return
         self.statusbar.showMessage("正在分析图像风格...")
         
         try:
@@ -844,7 +891,9 @@ class MainWindow(QMainWindow):
             self.statusbar.showMessage(f"风格分析: {summary.style_tags[:2]}", 3000)
             
             # 2. 本地搜索
-            self._ensure_model('image_db') 
+            if not self._ensure_model('image_db'):
+                QMessageBox.warning(self, "模型不可用", "图像数据库加载失败")
+                return
             local_results = self.image_db.search_similar(self.current_image, top_k=10)
             
             # 3. 网络搜索
@@ -971,6 +1020,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "错误", "无法读取选择的图片")
             self.color_panel.set_reference_status("读取参考图片失败", False)
             return
+
+        if not self._ensure_model('color_engine'):
+            QMessageBox.warning(self, "模型不可用", "调色引擎加载失败")
+            self.color_panel.set_reference_status("调色引擎加载失败", False)
+            return
         
         # 更新状态
         from pathlib import Path as PathLib
@@ -1010,23 +1064,38 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "文件夹中没有支持的图像文件")
             return
 
-        self._wait_for_thread()
+        if not self._ensure_model('image_db'):
+            QMessageBox.warning(self, "模型不可用", "图像数据库加载失败")
+            return
+        if not self._wait_for_thread():
+            return
+
         self.progress_bar.show()
         self.progress_bar.setRange(0, len(image_files))
 
+        worker = None
+
         def index_images():
+            success_count = 0
             for i, img_path in enumerate(image_files):
+                if worker and worker.stop_requested:
+                    print("[MainWindow] 索引线程接收到取消请求，提前中断")
+                    break
                 try:
                     self.image_db.add_image(str(img_path))
-                except Exception:
-                    pass
-                self.thread.progress.emit(i + 1)
-            return len(image_files)
+                    success_count += 1
+                except (OSError, ValueError, RuntimeError) as e:
+                    print(f"索引失败 {img_path}: {e}")
+                if worker:
+                    worker.progress.emit(i + 1)
+            return success_count
 
-        self.thread = ProcessingThread(index_images)
-        self.thread.progress.connect(self.progress_bar.setValue)
-        self.thread.finished.connect(lambda n: self._on_index_finished(n))
-        self.thread.start()
+        worker = ProcessingThread(index_images)
+        self.thread = worker
+        worker.progress.connect(self.progress_bar.setValue)
+        worker.finished.connect(lambda n: self._on_index_finished(n))
+        worker.error.connect(self._on_processing_error)
+        worker.start()
 
     def _on_index_finished(self, count: int):
         """索引完成回调"""
@@ -1041,11 +1110,14 @@ class MainWindow(QMainWindow):
             return
 
         # 懒加载AGI相机
-        self._ensure_model('agi_camera')
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
         # 设置当前图像
         self.agi_camera.set_image(self.current_image)
 
-        self._wait_for_thread()
+        if not self._wait_for_thread():
+            return
         self.progress_bar.show()
         self.progress_bar.setRange(0, 0)
 
@@ -1074,10 +1146,13 @@ class MainWindow(QMainWindow):
             return
 
         # 懒加载AGI相机
-        self._ensure_model('agi_camera')
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
         self.agi_camera.set_image(self.current_image)
 
-        self._wait_for_thread()
+        if not self._wait_for_thread():
+            return
         self.progress_bar.show()
         self.progress_bar.setRange(0, 0)
 
@@ -1113,6 +1188,9 @@ class MainWindow(QMainWindow):
         )
 
         if file_path:
+            if not self._ensure_model('agi_camera'):
+                QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+                return
             ext = Path(file_path).suffix.lower()[1:]
             self.agi_camera.export_3d_model(mesh, file_path, ext)
             self.statusbar.showMessage(f"3D模型已导出: {file_path}", 3000)
@@ -1125,7 +1203,9 @@ class MainWindow(QMainWindow):
             return
 
         # 懒加载AGI相机
-        self._ensure_model('agi_camera')
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
         self.agi_camera.set_image(self.current_image)
 
         self.statusbar.showMessage(f"正在分割物体... 点击位置: ({x}, {y})")
@@ -1135,7 +1215,8 @@ class MainWindow(QMainWindow):
         def do_segment():
             return self.agi_camera.select_object_at_point(x, y)
 
-        self._wait_for_thread()
+        if not self._wait_for_thread():
+            return
         self.thread = ProcessingThread(do_segment)
         self.thread.finished.connect(self._on_segment_finished)
         self.thread.error.connect(lambda e: self._on_segment_error(e))
@@ -1149,7 +1230,9 @@ class MainWindow(QMainWindow):
             return
 
         # 懒加载AGI相机
-        self._ensure_model('agi_camera')
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
         self.agi_camera.set_image(self.current_image)
 
         self.statusbar.showMessage(f"正在分割物体... 框选区域: ({x1}, {y1}) - ({x2}, {y2})")
@@ -1159,7 +1242,8 @@ class MainWindow(QMainWindow):
         def do_segment():
             return self.agi_camera.select_object_with_box(x1, y1, x2, y2)
 
-        self._wait_for_thread()
+        if not self._wait_for_thread():
+            return
         self.thread = ProcessingThread(do_segment)
         self.thread.finished.connect(self._on_segment_finished)
         self.thread.error.connect(lambda e: self._on_segment_error(e))
@@ -1173,7 +1257,9 @@ class MainWindow(QMainWindow):
             return
 
         # 懒加载AGI相机
-        self._ensure_model('agi_camera')
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
         self.agi_camera.set_image(self.current_image)
 
         self.statusbar.showMessage(f"正在分割物体... 划线路径: {len(path_points)} 个点")
@@ -1183,7 +1269,8 @@ class MainWindow(QMainWindow):
         def do_segment():
             return self.agi_camera.select_object_with_path(path_points)
 
-        self._wait_for_thread()
+        if not self._wait_for_thread():
+            return
         self.thread = ProcessingThread(do_segment)
         self.thread.finished.connect(self._on_segment_finished)
         self.thread.error.connect(lambda e: self._on_segment_error(e))
@@ -1213,10 +1300,15 @@ class MainWindow(QMainWindow):
     def _on_generate_object_3d(self, params: dict):
         """从选中物体生成3D"""
         # 懒加载AGI相机（如果还未加载）
-        self._ensure_model('agi_camera')
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
         
         if not self.agi_camera.has_selection():
             QMessageBox.warning(self, "提示", "请先选择物体")
+            return
+
+        if not self._wait_for_thread():
             return
 
         self.progress_bar.show()
@@ -1241,7 +1333,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请至少选择2张不同角度的图片")
             return
 
-        self._wait_for_thread()
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
+
+        if not self._wait_for_thread():
+            return
         self.progress_bar.show()
         self.progress_bar.setRange(0, 0)
         self.statusbar.showMessage(f"正在从{len(image_paths)}张图片进行多视角3D重建...")
@@ -1301,9 +1398,9 @@ class MainWindow(QMainWindow):
             self.thread.request_stop()
             if not self.thread.wait(5000):  # 等待最多5秒
                 print("[MainWindow] 警告: 处理线程等待超时")
-                print("[MainWindow] 将在后台等待线程完成")
-                # 不使用terminate(),让线程自然结束
-                # 应用程序关闭时线程会自动结束
+                self.statusbar.showMessage("后台任务仍在运行，暂不能关闭", 5000)
+                event.ignore()
+                return
             else:
                 print("[MainWindow] 处理线程已停止")
 

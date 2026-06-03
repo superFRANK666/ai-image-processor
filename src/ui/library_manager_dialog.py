@@ -376,8 +376,8 @@ class LibraryManagerDialog(QDialog):
             print("[LibraryManagerDialog] 停止缩略图加载线程...")
             self.loader_thread.stop()
             if not self.loader_thread.wait(3000):
-                print("[LibraryManagerDialog] 警告: 线程等待超时，强制终止")
-                self.loader_thread.terminate()
-                self.loader_thread.wait()
+                print("[LibraryManagerDialog] 警告: 线程等待超时，暂不关闭")
+                event.ignore()
+                return
         event.accept()
 

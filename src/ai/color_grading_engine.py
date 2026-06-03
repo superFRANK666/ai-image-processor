@@ -59,87 +59,115 @@ class ColorGradingEngine:
         # 转换为浮点数进行处理
         img = image.astype(np.float32) / 255.0
 
-        # 1. 曝光调整
+        # 1. 曝光与对比度 (BGR Float32)
         img = self._adjust_exposure(img, params.exposure)
-
-        # 2. 色温和色调
-        img = self._adjust_white_balance(img, params.temperature, params.tint)
-
-        # 3. 对比度
         img = self._adjust_contrast(img, params.contrast)
 
-        # 4. 高光和阴影
-        img = self._adjust_highlights_shadows(img, params.highlights, params.shadows)
-
-        # 5. 白色和黑色
+        # 2. 白色与黑色 (采用渐进平滑插值过渡)
         img = self._adjust_whites_blacks(img, params.whites, params.blacks)
 
-        # 6. 饱和度和自然饱和度
-        img = self._adjust_saturation(img, params.saturation, params.vibrance)
+        # 3. 色温和色调 (合并 LAB 转换)
+        if params.temperature != 0 or params.tint != 0:
+            img_uint8 = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+            lab = cv2.cvtColor(img_uint8, cv2.COLOR_BGR2LAB).astype(np.float32)
+            if params.tint != 0:
+                lab[:, :, 1] = np.clip(lab[:, :, 1] + params.tint * 1.28, 0, 255)
+            if params.temperature != 0:
+                lab[:, :, 2] = np.clip(lab[:, :, 2] + params.temperature * 1.28, 0, 255)
+            img_uint8 = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+            img = img_uint8.astype(np.float32) / 255.0
 
-        # 7. 色相偏移
-        if params.hue_shift != 0:
-            img = self._adjust_hue(img, params.hue_shift)
+        # 4. 高光、阴影、饱和度、自然饱和度、色相偏移 (合并 HSV 转换)
+        has_hsv = (params.highlights != 0 or params.shadows != 0 or
+                   params.saturation != 1.0 or params.vibrance != 0 or
+                   params.hue_shift != 0)
+        if has_hsv:
+            img_uint8 = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+            hsv = cv2.cvtColor(img_uint8, cv2.COLOR_BGR2HSV).astype(np.float32)
 
-        # 8. 清晰度
+            # 高光 & 阴影
+            if params.highlights != 0 or params.shadows != 0:
+                v = hsv[:, :, 2] / 255.0
+                if params.highlights != 0:
+                    highlight_mask = np.clip((v - 0.5) * 2.0, 0, 1)
+                    v = v + highlight_mask * (params.highlights / 100.0) * 0.3
+                if params.shadows != 0:
+                    shadow_mask = np.clip((0.5 - v) * 2.0, 0, 1)
+                    v = v + shadow_mask * (params.shadows / 100.0) * 0.3
+                hsv[:, :, 2] = np.clip(v * 255.0, 0, 255)
+
+            # 饱和度 & 自然饱和度
+            if params.saturation != 1.0 or params.vibrance != 0:
+                s = hsv[:, :, 1]
+                if params.saturation != 1.0:
+                    s = s * params.saturation
+                if params.vibrance != 0:
+                    sat_factor = 1.0 - (s / 255.0)
+                    s = s + sat_factor * (params.vibrance / 100.0) * 50.0
+                hsv[:, :, 1] = np.clip(s, 0, 255)
+
+            # 色相偏移
+            if params.hue_shift != 0:
+                hsv[:, :, 0] = (hsv[:, :, 0] + params.hue_shift / 2) % 180
+
+            img_uint8 = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+            img = img_uint8.astype(np.float32) / 255.0
+
+        # 5. 清晰度 (直接在 float32 运算)
         if params.clarity != 0:
             img = self._adjust_clarity(img, params.clarity)
 
-        # 9. 去雾
+        # 6. 去雾 (直接在 float32 运算)
         if params.dehaze != 0:
             img = self._dehaze(img, params.dehaze)
 
-        # 10. 分离色调
+        # 7. 分离色调 (直接在 float32 运算，使用 broadcasting)
         if params.split_tone_shadows != [0, 0, 0] or params.split_tone_highlights != [255, 255, 255]:
             img = self._apply_split_toning(img, params.split_tone_shadows,
                                           params.split_tone_highlights, params.split_tone_balance)
 
-        # 11. 褪色效果
+        # 8. 褪色效果
         if params.fade > 0:
             img = self._apply_fade(img, params.fade)
 
-        # 12. 暗角
+        # 9. 暗角
         if params.vignette > 0:
             img = self._apply_vignette(img, params.vignette)
 
-        # 13. 颗粒
+        # 10. 颗粒
         if params.grain > 0:
             img = self._apply_grain(img, params.grain)
 
-        # 14. 自定义曲线
-        if params.tone_curve:
-            img = self._apply_tone_curve(img, params.tone_curve)
-
         # 裁剪并转换回uint8
-        img = np.clip(img * 255, 0, 255).astype(np.uint8)
-        return img
+        img_uint8 = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+
+        # 11. 自定义曲线 (直接在 uint8 上执行，极速)
+        if params.tone_curve:
+            img_uint8 = self._apply_tone_curve_uint8(img_uint8, params.tone_curve)
+
+        return img_uint8
 
     def _adjust_exposure(self, img: np.ndarray, exposure: float) -> np.ndarray:
         """曝光调整"""
         if exposure == 0:
             return img
         # 使用2的幂次方调整,模拟相机曝光
-        factor = 2 ** exposure
+        factor = 2.0 ** exposure
         return img * factor
 
     def _adjust_white_balance(self, img: np.ndarray, temperature: float, tint: float) -> np.ndarray:
-        """色温和色调调整"""
+        """色温和色调调整 (兼容层：直接调用优化管道)"""
+        # 如果需要色温和色调，通过单独的快转换完成
         if temperature == 0 and tint == 0:
             return img
-
-        # 转换到LAB色彩空间
-        img_uint8 = np.clip(img * 255, 0, 255).astype(np.uint8)
+        img_uint8 = np.clip(img * 255.0, 0, 255).astype(np.uint8)
         lab = cv2.cvtColor(img_uint8, cv2.COLOR_BGR2LAB).astype(np.float32)
-
-        # 调整a通道(绿-品红) - tint
-        lab[:, :, 1] = lab[:, :, 1] + tint * 1.28
-
-        # 调整b通道(蓝-黄) - temperature
-        lab[:, :, 2] = lab[:, :, 2] + temperature * 1.28
-
-        lab = np.clip(lab, 0, 255).astype(np.uint8)
-        result = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-        return result.astype(np.float32) / 255.0
+        if tint != 0:
+            lab[:, :, 1] = np.clip(lab[:, :, 1] + tint * 1.28, 0, 255)
+        if temperature != 0:
+            lab[:, :, 2] = np.clip(lab[:, :, 2] + temperature * 1.28, 0, 255)
+        img_uint8 = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+        return img_uint8.astype(np.float32) / 255.0
 
     def _adjust_contrast(self, img: np.ndarray, contrast: float) -> np.ndarray:
         """对比度调整"""
@@ -149,138 +177,119 @@ class ColorGradingEngine:
         return (img - mean) * contrast + mean
 
     def _adjust_highlights_shadows(self, img: np.ndarray, highlights: float, shadows: float) -> np.ndarray:
-        """高光和阴影调整"""
+        """高光和阴影调整 (兼容层：直接调用优化快转换)"""
         if highlights == 0 and shadows == 0:
             return img
-
-        # 转换到HSV
-        img_uint8 = np.clip(img * 255, 0, 255).astype(np.uint8)
+        img_uint8 = np.clip(img * 255.0, 0, 255).astype(np.uint8)
         hsv = cv2.cvtColor(img_uint8, cv2.COLOR_BGR2HSV).astype(np.float32)
-
         v = hsv[:, :, 2] / 255.0
-
-        # 高光调整 (影响亮部)
         if highlights != 0:
-            highlight_mask = np.clip((v - 0.5) * 2, 0, 1)
+            highlight_mask = np.clip((v - 0.5) * 2.0, 0, 1)
             v = v + highlight_mask * (highlights / 100.0) * 0.3
-
-        # 阴影调整 (影响暗部)
         if shadows != 0:
-            shadow_mask = np.clip((0.5 - v) * 2, 0, 1)
+            shadow_mask = np.clip((0.5 - v) * 2.0, 0, 1)
             v = v + shadow_mask * (shadows / 100.0) * 0.3
-
-        hsv[:, :, 2] = np.clip(v * 255, 0, 255)
-        result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-        return result.astype(np.float32) / 255.0
+        hsv[:, :, 2] = np.clip(v * 255.0, 0, 255)
+        img_uint8 = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        return img_uint8.astype(np.float32) / 255.0
 
     def _adjust_whites_blacks(self, img: np.ndarray, whites: float, blacks: float) -> np.ndarray:
-        """白色和黑色调整"""
+        """白色和黑色调整 (采用渐变平滑过渡，杜绝色彩断带)"""
         if whites == 0 and blacks == 0:
             return img
 
         result = img.copy()
 
+        # 对于 whites (高光亮部)：从 0.7 到 1.0 建立平滑插值遮罩
         if whites != 0:
-            # 白色调整 - 影响最亮的部分
+            mask = np.clip((result - 0.7) / 0.3, 0.0, 1.0)
+            smooth_mask = mask * mask * (3.0 - 2.0 * mask)  # Smoothstep
             white_point = 1.0 + whites / 200.0
-            result = np.where(result > 0.9, result * white_point, result)
+            adjusted = result * white_point
+            result = result * (1.0 - smooth_mask) + adjusted * smooth_mask
 
+        # 对于 blacks (暗部深色部)：从 0.0 到 0.3 建立平滑插值遮罩
         if blacks != 0:
-            # 黑色调整 - 影响最暗的部分
+            mask = np.clip((0.3 - result) / 0.3, 0.0, 1.0)
+            smooth_mask = mask * mask * (3.0 - 2.0 * mask)  # Smoothstep
             black_lift = blacks / 200.0
-            result = np.where(result < 0.1, result + black_lift, result)
+            adjusted = result + black_lift
+            result = result * (1.0 - smooth_mask) + adjusted * smooth_mask
 
         return result
 
     def _adjust_saturation(self, img: np.ndarray, saturation: float, vibrance: float) -> np.ndarray:
-        """饱和度和自然饱和度调整"""
+        """饱和度和自然饱和度调整 (兼容层)"""
         if saturation == 1.0 and vibrance == 0:
             return img
-
-        img_uint8 = np.clip(img * 255, 0, 255).astype(np.uint8)
+        img_uint8 = np.clip(img * 255.0, 0, 255).astype(np.uint8)
         hsv = cv2.cvtColor(img_uint8, cv2.COLOR_BGR2HSV).astype(np.float32)
-
         s = hsv[:, :, 1]
-
-        # 饱和度调整
         if saturation != 1.0:
             s = s * saturation
-
-        # 自然饱和度调整 (对低饱和度区域影响更大)
         if vibrance != 0:
-            sat_factor = 1.0 - (s / 255.0)  # 低饱和度区域权重更高
-            s = s + sat_factor * (vibrance / 100.0) * 50
-
+            sat_factor = 1.0 - (s / 255.0)
+            s = s + sat_factor * (vibrance / 100.0) * 50.0
         hsv[:, :, 1] = np.clip(s, 0, 255)
-        result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-        return result.astype(np.float32) / 255.0
+        img_uint8 = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        return img_uint8.astype(np.float32) / 255.0
 
     def _adjust_hue(self, img: np.ndarray, hue_shift: float) -> np.ndarray:
-        """色相偏移"""
-        img_uint8 = np.clip(img * 255, 0, 255).astype(np.uint8)
+        """色相偏移 (兼容层)"""
+        if hue_shift == 0:
+            return img
+        img_uint8 = np.clip(img * 255.0, 0, 255).astype(np.uint8)
         hsv = cv2.cvtColor(img_uint8, cv2.COLOR_BGR2HSV).astype(np.float32)
-
-        # OpenCV的H范围是0-179
         hsv[:, :, 0] = (hsv[:, :, 0] + hue_shift / 2) % 180
-
-        result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-        return result.astype(np.float32) / 255.0
+        img_uint8 = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        return img_uint8.astype(np.float32) / 255.0
 
     def _adjust_clarity(self, img: np.ndarray, clarity: float) -> np.ndarray:
-        """清晰度调整 (中频对比度)"""
+        """清晰度调整 (中频对比度) - 直接在 Float32 空间上运算"""
         if clarity == 0:
             return img
-
-        img_uint8 = np.clip(img * 255, 0, 255).astype(np.uint8)
-
-        # 使用unsharp mask技术
-        blur = cv2.GaussianBlur(img_uint8, (0, 0), 10)
+        blur = cv2.GaussianBlur(img, (0, 0), 10)
         factor = 1.0 + clarity / 100.0
-
-        result = cv2.addWeighted(img_uint8, factor, blur, 1 - factor, 0)
-        return result.astype(np.float32) / 255.0
+        return cv2.addWeighted(img, factor, blur, 1.0 - factor, 0.0)
 
     def _dehaze(self, img: np.ndarray, strength: float) -> np.ndarray:
-        """去雾效果"""
+        """去雾效果 - 直接在 Float32 空间上运算"""
         if strength == 0:
             return img
 
-        # 简化的去雾算法
-        img_uint8 = np.clip(img * 255, 0, 255).astype(np.uint8)
-
         # 估计大气光
-        dark_channel = np.min(img_uint8, axis=2)
+        dark_channel = np.min(img, axis=2)
         atmospheric_light = np.percentile(dark_channel, 99)
 
         # 去雾
         factor = strength / 100.0
-        result = img_uint8.astype(np.float32)
-        result = (result - atmospheric_light * factor) / (1 - factor) + atmospheric_light * factor
-
-        return np.clip(result, 0, 255).astype(np.uint8).astype(np.float32) / 255.0
+        result = (img - atmospheric_light * factor) / (1.0 - factor + 1e-6) + atmospheric_light * factor
+        return result
 
     def _apply_split_toning(self, img: np.ndarray, shadows_color: list,
                             highlights_color: list, balance: float) -> np.ndarray:
-        """分离色调"""
-        img_uint8 = np.clip(img * 255, 0, 255).astype(np.uint8)
-        gray = cv2.cvtColor(img_uint8, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        """分离色调 - 直接在 Float32 空间上运算，采用 broadcasting 加速"""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         # 创建阴影和高光遮罩
-        shadow_mask = np.clip(1.0 - gray * 2, 0, 1)
-        highlight_mask = np.clip(gray * 2 - 1, 0, 1)
+        shadow_mask = np.clip(1.0 - gray * 2.0, 0.0, 1.0)
+        highlight_mask = np.clip(gray * 2.0 - 1.0, 0.0, 1.0)
 
         # 应用平衡
-        balance_factor = (balance + 100) / 200.0
-        shadow_mask *= (1 - balance_factor)
+        balance_factor = (balance + 100.0) / 200.0
+        shadow_mask *= (1.0 - balance_factor)
         highlight_mask *= balance_factor
 
         result = img.copy()
-        shadows_rgb = np.array(shadows_color[::-1]) / 255.0  # BGR
-        highlights_rgb = np.array(highlights_color[::-1]) / 255.0
+        shadows_bgr = np.array(shadows_color[::-1]) / 255.0  # BGR
+        highlights_bgr = np.array(highlights_color[::-1]) / 255.0
 
-        for i in range(3):
-            result[:, :, i] = result[:, :, i] * (1 - shadow_mask * 0.3) + shadows_rgb[i] * shadow_mask * 0.3
-            result[:, :, i] = result[:, :, i] * (1 - highlight_mask * 0.3) + highlights_rgb[i] * highlight_mask * 0.3
+        # 使用 broadcasting 避免 for 循环 (提升通道计算效率)
+        shadow_mask_expanded = shadow_mask[:, :, np.newaxis]
+        highlight_mask_expanded = highlight_mask[:, :, np.newaxis]
+
+        result = result * (1.0 - shadow_mask_expanded * 0.3) + shadows_bgr * shadow_mask_expanded * 0.3
+        result = result * (1.0 - highlight_mask_expanded * 0.3) + highlights_bgr * highlight_mask_expanded * 0.3
 
         return result
 
@@ -291,8 +300,8 @@ class ColorGradingEngine:
 
         # 提升黑色点
         black_point = fade * 0.3
-        result = img * (1 - fade) + black_point + img * fade * 0.7
-        return np.clip(result, 0, 1)
+        result = img * (1.0 - fade) + black_point + img * fade * 0.7
+        return np.clip(result, 0, 1.0)
 
     def _apply_vignette(self, img: np.ndarray, strength: float) -> np.ndarray:
         """暗角效果"""
@@ -301,15 +310,15 @@ class ColorGradingEngine:
 
         h, w = img.shape[:2]
         Y, X = np.ogrid[:h, :w]
-        center_y, center_x = h / 2, w / 2
+        center_y, center_x = h / 2.0, w / 2.0
 
         # 计算到中心的距离
         dist = np.sqrt((X - center_x) ** 2 + (Y - center_y) ** 2)
         max_dist = np.sqrt(center_x ** 2 + center_y ** 2)
 
         # 创建暗角遮罩
-        vignette = 1 - (dist / max_dist) ** 2 * (strength / 100.0)
-        vignette = np.clip(vignette, 0, 1)
+        vignette = 1.0 - (dist / max_dist) ** 2 * (strength / 100.0)
+        vignette = np.clip(vignette, 0, 1.0)
 
         return img * vignette[:, :, np.newaxis]
 
@@ -320,12 +329,12 @@ class ColorGradingEngine:
 
         noise = np.random.normal(0, amount / 100.0 * 0.1, img.shape)
         result = img + noise
-        return np.clip(result, 0, 1)
+        return np.clip(result, 0, 1.0)
 
-    def _apply_tone_curve(self, img: np.ndarray, curve_points: list) -> np.ndarray:
-        """应用自定义曲线"""
+    def _apply_tone_curve_uint8(self, img_uint8: np.ndarray, curve_points: list) -> np.ndarray:
+        """直接在 uint8 图像上应用自定义曲线查找表"""
         if not curve_points or len(curve_points) < 2:
-            return img
+            return img_uint8
 
         # 创建查找表
         lut = np.zeros(256, dtype=np.uint8)
@@ -342,9 +351,7 @@ class ColorGradingEngine:
             else:
                 lut[i] = i
 
-        img_uint8 = np.clip(img * 255, 0, 255).astype(np.uint8)
-        result = cv2.LUT(img_uint8, lut)
-        return result.astype(np.float32) / 255.0
+        return cv2.LUT(img_uint8, lut)
 
     def extract_color_params(self, image: np.ndarray) -> ColorGradingParams:
         """

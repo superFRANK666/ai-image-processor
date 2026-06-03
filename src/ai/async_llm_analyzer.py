@@ -48,7 +48,22 @@ class AsyncLLMColorAnalyzer:
         """
         self.llm_analyzer = llm_analyzer
         self._current_thread: Optional[AsyncLLMAnalysisThread] = None
+        self._retired_threads: list[AsyncLLMAnalysisThread] = []
         self._lock = threading.Lock()
+
+    def _retire_thread(self, thread: AsyncLLMAnalysisThread):
+        """保留被软取消的线程引用，直到它自然结束。"""
+        if thread not in self._retired_threads:
+            self._retired_threads.append(thread)
+            thread.finished.connect(lambda: self._release_thread(thread))
+
+    def _release_thread(self, thread: AsyncLLMAnalysisThread):
+        """线程结束后的引用清理。"""
+        with self._lock:
+            if self._current_thread is thread:
+                self._current_thread = None
+            if thread in self._retired_threads:
+                self._retired_threads.remove(thread)
 
     def analyze_async(
         self,
@@ -70,13 +85,9 @@ class AsyncLLMColorAnalyzer:
         # 如果有正在运行的线程，取消它
         with self._lock:
             if self._current_thread and self._current_thread.isRunning():
-                print("[AsyncLLMColorAnalyzer] 取消旧分析线程...")
+                print("[AsyncLLMColorAnalyzer] 取消旧分析线程 (软取消)...")
                 self._current_thread.request_stop()
-                if not self._current_thread.wait(3000):
-                    print("[AsyncLLMColorAnalyzer] 警告: 线程等待超时，强制终止")
-                    self._current_thread.terminate()
-                    self._current_thread.wait()
-                self._current_thread.deleteLater()
+                self._retire_thread(self._current_thread)
                 self._current_thread = None
 
         # 创建新线程
@@ -87,6 +98,10 @@ class AsyncLLMColorAnalyzer:
             thread.analysis_finished.connect(on_success)
         if on_error:
             thread.analysis_failed.connect(on_error)
+
+        # 确保线程完成后自动销毁释放资源
+        thread.finished.connect(lambda: self._release_thread(thread))
+        thread.finished.connect(thread.deleteLater)
 
         # 保存当前线程引用
         with self._lock:
@@ -113,13 +128,9 @@ class AsyncLLMColorAnalyzer:
         """取消当前正在进行的分析"""
         with self._lock:
             if self._current_thread and self._current_thread.isRunning():
-                print("[AsyncLLMColorAnalyzer] 取消当前分析...")
+                print("[AsyncLLMColorAnalyzer] 取消当前分析 (软取消)...")
                 self._current_thread.request_stop()
-                if not self._current_thread.wait(3000):
-                    print("[AsyncLLMColorAnalyzer] 警告: 取消等待超时，强制终止")
-                    self._current_thread.terminate()
-                    self._current_thread.wait()
-                self._current_thread.deleteLater()
+                self._retire_thread(self._current_thread)
                 self._current_thread = None
 
     def is_busy(self) -> bool:

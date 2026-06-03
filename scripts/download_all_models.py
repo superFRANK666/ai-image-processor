@@ -12,6 +12,9 @@
 """
 import os
 import sys
+import hashlib
+import shutil
+import zipfile
 from pathlib import Path
 
 # 修复Windows控制台编码
@@ -21,11 +24,81 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # 设置环境变量,使用HuggingFace镜像
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+if 'HF_ENDPOINT' not in os.environ:
+    os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 PROJECT_ROOT = Path(__file__).parent.parent  # 项目根目录
 MODELS_DIR = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(exist_ok=True)
+
+MOBILE_SAM_SHA256 = "f3c0d8cda613564d499310dab6c812cd80d9de20dd0e7d7b3ea0cd86ff5c76d6"
+
+
+def calculate_sha256(file_path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """计算文件 SHA256。"""
+    digest = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_sha256(file_path: Path, expected_sha256: str) -> bool:
+    """校验文件 SHA256。"""
+    actual_sha256 = calculate_sha256(file_path)
+    if actual_sha256.lower() != expected_sha256.lower():
+        print("  ✗ SHA256 校验失败")
+        print(f"    预期: {expected_sha256}")
+        print(f"    实际: {actual_sha256}")
+        return False
+    print(f"  ✓ SHA256 校验通过: {actual_sha256}")
+    return True
+
+
+def download_file_atomic(url: str, output_path: Path, expected_sha256: str = None, stream: bool = True):
+    """下载到临时文件，校验通过后再替换目标文件。"""
+    import requests
+
+    tmp_path = output_path.with_suffix(output_path.suffix + ".part")
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    response = requests.get(url, timeout=60, stream=stream)
+    response.raise_for_status()
+
+    if stream:
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded = 0
+        with open(tmp_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        percent = (downloaded / total_size) * 100
+                        print(f"\r  下载进度: {percent:.1f}%", end='')
+        if total_size > 0:
+            print()
+    else:
+        with open(tmp_path, 'wb') as f:
+            f.write(response.content)
+
+    if expected_sha256 and not verify_sha256(tmp_path, expected_sha256):
+        tmp_path.unlink(missing_ok=True)
+        raise ValueError("下载文件校验失败")
+
+    tmp_path.replace(output_path)
+
+
+def safe_extract_zip(zip_path: Path, target_dir: Path):
+    """安全解压 ZIP，拒绝路径穿越条目。"""
+    target_root = target_dir.resolve()
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        for member in zip_ref.infolist():
+            destination = (target_root / member.filename).resolve()
+            if target_root != destination and target_root not in destination.parents:
+                raise ValueError(f"ZIP 包含非法路径: {member.filename}")
+        zip_ref.extractall(target_root)
 
 print("=" * 80)
 print("   AI影像处理软件 - 完整模型下载工具")
@@ -93,16 +166,19 @@ print("[3/6] 下载MobileSAM权重 (约40MB)...")
 print("=" * 80)
 try:
     import requests
-    import torch
 
     sam_dir = MODELS_DIR / "mobile-sam"
     sam_dir.mkdir(exist_ok=True)
     sam_file = sam_dir / "mobile_sam.pt"
 
-    if sam_file.exists():
-        print("  ✓ 模型已存在,跳过")
+    if sam_file.exists() and verify_sha256(sam_file, MOBILE_SAM_SHA256):
+        print("  ✓ 模型已存在且校验通过,跳过")
         downloaded_models += 1
     else:
+        if sam_file.exists():
+            print("  ⚠ 已有模型校验失败，将重新下载")
+            sam_file.unlink()
+
         url = "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt"
         mirrors = [
             "https://ghproxy.net/" + url,
@@ -114,19 +190,7 @@ try:
         for mirror in mirrors:
             try:
                 print(f"  尝试从镜像下载: {mirror[:60]}...")
-                response = requests.get(mirror, timeout=60, stream=True)
-                response.raise_for_status()
-
-                total_size = int(response.headers.get('content-length', 0))
-                with open(sam_file, 'wb') as f:
-                    downloaded = 0
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if total_size > 0:
-                                percent = (downloaded / total_size) * 100
-                                print(f"\r  下载进度: {percent:.1f}%", end='')
+                download_file_atomic(mirror, sam_file, expected_sha256=MOBILE_SAM_SHA256)
                 print(f"\n  ✓ 下载完成: {sam_file}")
                 downloaded_models += 1
                 success = True
@@ -144,8 +208,6 @@ except Exception as e:
 # 4. 下载MobileSAM源码
 print("\n安装MobileSAM源码...")
 try:
-    import zipfile
-    import shutil
     import requests
 
     src_dir = PROJECT_ROOT / "src"
@@ -177,8 +239,8 @@ try:
                 # 解压
                 if temp_extract.exists():
                     shutil.rmtree(temp_extract)
-                with zipfile.ZipFile(temp_zip, 'r') as zip_ref:
-                    zip_ref.extractall(temp_extract)
+                temp_extract.mkdir(parents=True, exist_ok=True)
+                safe_extract_zip(temp_zip, temp_extract)
 
                 # 移动文件
                 root_dir = next(temp_extract.glob("MobileSAM-*"), None)
@@ -238,7 +300,7 @@ if user_input == 'y':
             downloaded_models += 1
         else:
             print("  正在下载分词器...")
-            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=False)
             tokenizer.save_pretrained(str(save_path))
 
             print("  正在下载模型权重 (约3GB,可能需要较长时间)...")
@@ -246,7 +308,7 @@ if user_input == 'y':
                 model_name,
                 torch_dtype="auto",
                 device_map="cpu",
-                trust_remote_code=True
+                trust_remote_code=False
             )
             model.save_pretrained(str(save_path))
             print(f"  ✓ 下载完成: {save_path}")

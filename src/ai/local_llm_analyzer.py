@@ -49,7 +49,8 @@ class LocalLLMColorAnalyzer:
     def __init__(self, model_name: str = "Qwen/Qwen2.5-1.5B-Instruct", device: str = "auto",
                  quantization_config: Optional[Dict[str, Any]] = None,
                  max_memory: Optional[Dict[str, str]] = None,
-                 offload_folder: Optional[str] = None):
+                 offload_folder: Optional[str] = None,
+                 trust_remote_code: bool = False):
         """
         初始化本地模型分析器
 
@@ -62,12 +63,14 @@ class LocalLLMColorAnalyzer:
                 - compute_dtype: str, 计算精度 ("float16"/"bfloat16")
             max_memory: 最大内存限制 {"gpu": "6GB", "cpu": "8GB"}
             offload_folder: CPU卸载文件夹
+            trust_remote_code: 是否允许执行模型仓库中的自定义代码
         """
         self.model_name = model_name
         self.device = device
         self.quantization_config = quantization_config or {}
         self.max_memory = max_memory
         self.offload_folder = offload_folder
+        self.trust_remote_code = trust_remote_code
         self.model = None
         self.tokenizer = None
         self._load_model()
@@ -94,12 +97,12 @@ class LocalLLMColorAnalyzer:
             # 加载分词器
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.model_name,
-                trust_remote_code=True
+                trust_remote_code=self.trust_remote_code
             )
 
             # 构建加载参数
             load_kwargs = {
-                "trust_remote_code": True,
+                "trust_remote_code": self.trust_remote_code,
             }
 
             # 量化配置

@@ -11,6 +11,14 @@ from functools import partial
 from .modeling import ImageEncoderViT, MaskDecoder, PromptEncoder, Sam, TwoWayTransformer, TinyViT
 
 
+def _load_state_dict(checkpoint_file):
+    """Load checkpoint tensors without unpickling arbitrary objects when supported."""
+    try:
+        return torch.load(checkpoint_file, weights_only=True)
+    except TypeError:
+        return torch.load(checkpoint_file)
+
+
 def build_sam_vit_h(checkpoint=None):
     return _build_sam(
         encoder_embed_dim=1280,
@@ -88,7 +96,7 @@ def build_sam_vit_t(checkpoint=None):
     mobile_sam.eval()
     if checkpoint is not None:
         with open(checkpoint, "rb") as f:
-            state_dict = torch.load(f)
+            state_dict = _load_state_dict(f)
         mobile_sam.load_state_dict(state_dict)
     return mobile_sam
 
@@ -152,7 +160,7 @@ def _build_sam(
     sam.eval()
     if checkpoint is not None:
         with open(checkpoint, "rb") as f:
-            state_dict = torch.load(f)
+            state_dict = _load_state_dict(f)
         sam.load_state_dict(state_dict)
     return sam
 

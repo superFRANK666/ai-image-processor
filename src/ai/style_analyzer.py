@@ -55,6 +55,21 @@ class StyleAnalyzer:
         self.style_embeddings = None
         self.content_embeddings = None
         self._precompute_embeddings()
+
+    def _ensure_semantic_ready(self) -> bool:
+        """确保 CLIP 模型与文本标签 embedding 已准备好。"""
+        if getattr(self.extractor, "model", None) is None:
+            init_attempted = getattr(self.extractor, "_model_init_attempted", False)
+            if not init_attempted and hasattr(self.extractor, "_init_model"):
+                self.extractor._init_model()
+
+        if self.extractor.model is None:
+            return False
+
+        if self.style_embeddings is None or self.content_embeddings is None:
+            self._precompute_embeddings()
+
+        return self.style_embeddings is not None and self.content_embeddings is not None
         
     def _precompute_embeddings(self):
         """预计算标签的Embedding"""
@@ -167,7 +182,7 @@ class StyleAnalyzer:
 
     def _analyze_semantics_clip(self, image: np.ndarray) -> tuple[List[str], List[str]]:
         """使用CLIP进行Zero-shot分类"""
-        if self.extractor.model is None or self.style_embeddings is None:
+        if not self._ensure_semantic_ready():
             return [], []
             
         try:

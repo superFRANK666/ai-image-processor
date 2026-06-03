@@ -235,7 +235,7 @@ class GeometryUtils:
     @staticmethod
     def create_grid_mesh(width: int, height: int) -> np.ndarray:
         """
-        创建网格面索引
+        创建网格面索引 (NumPy向量化高效实现)
         
         Args:
             width: 网格宽度（列数）
@@ -244,22 +244,23 @@ class GeometryUtils:
         Returns:
             面索引数组 ((width-1)*(height-1)*2, 3)
         """
-        faces = []
-        
-        for i in range(height - 1):
-            for j in range(width - 1):
-                # 顶点索引
-                v0 = i * width + j
-                v1 = i * width + (j + 1)
-                v2 = (i + 1) * width + j
-                v3 = (i + 1) * width + (j + 1)
-                
-                # 两个三角形组成一个四边形
-                faces.append([v0, v2, v1])
-                faces.append([v1, v2, v3])
-        
-        return np.array(faces, dtype=np.int32)
-    
+        # 生成网格索引 (height-1, width-1)
+        i, j = np.meshgrid(np.arange(height - 1), np.arange(width - 1), indexing='ij')
+
+        # 计算顶点索引
+        v0 = i * width + j
+        v1 = i * width + (j + 1)
+        v2 = (i + 1) * width + j
+        v3 = (i + 1) * width + (j + 1)
+
+        # 构建两个三角形 (v0, v2, v1) 和 (v1, v2, v3)
+        faces_a = np.stack([v0, v2, v1], axis=-1)
+        faces_b = np.stack([v1, v2, v3], axis=-1)
+
+        # 按旧实现的逐网格顺序交错两个三角形，避免改变纹理和导出面顺序。
+        faces = np.stack([faces_a, faces_b], axis=2).reshape(-1, 3)
+        return faces.astype(np.int32)
+
     @staticmethod
     def create_uv_coordinates(width: int, height: int) -> np.ndarray:
         """

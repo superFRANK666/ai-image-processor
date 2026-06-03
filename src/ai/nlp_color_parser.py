@@ -234,7 +234,11 @@ class NLPColorParser:
             # 创建本地分析器
             local_analyzer = LocalLLMColorAnalyzer(
                 model_name=model_name,
-                device=device
+                device=device,
+                quantization_config=llm_config.get('quantization'),
+                max_memory=llm_config.get('max_memory'),
+                offload_folder=llm_config.get('offload_folder'),
+                trust_remote_code=llm_config.get('trust_remote_code', False)
             )
 
             # 用异步包装器包装
