@@ -256,6 +256,32 @@ class ColorGradingPanel(QWidget):
 
         layout.addLayout(btn_layout)
 
+        self._image_dependent_widgets = [
+            self.text_input,
+            self.apply_btn,
+            self.preset_combo,
+            self.find_similar_btn,
+            self.upload_reference_btn,
+            self.reset_btn,
+            self.copy_params_btn,
+            self.exposure_slider,
+            self.contrast_slider,
+            self.highlights_slider,
+            self.shadows_slider,
+            self.whites_slider,
+            self.blacks_slider,
+            self.temperature_slider,
+            self.tint_slider,
+            self.vibrance_slider,
+            self.saturation_slider,
+            self.hue_slider,
+            self.clarity_slider,
+            self.dehaze_slider,
+            self.vignette_slider,
+            self.grain_slider,
+            self.fade_slider,
+        ]
+
     def _connect_signals(self):
         """连接信号"""
         # 文本输入
@@ -389,3 +415,8 @@ class ColorGradingPanel(QWidget):
         color = "#4CAF50" if success else "#888"
         self.reference_status_label.setStyleSheet(f"color: {color}; font-size: 11px;")
         self.reference_status_label.setText(message)
+
+    def set_image_available(self, available: bool):
+        """根据是否有当前图像启用或禁用调色交互。"""
+        for widget in self._image_dependent_widgets:
+            widget.setEnabled(available)

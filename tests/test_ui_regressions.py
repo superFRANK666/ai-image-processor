@@ -53,6 +53,22 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertEqual(panel.apply_btn.text(), "分析中...")
         self.assertFalse(panel.apply_btn.isEnabled())
 
+    def test_color_panel_can_reflect_missing_image_state(self):
+        from src.ui.color_grading_panel import ColorGradingPanel
+
+        panel = ColorGradingPanel()
+        panel.set_image_available(False)
+
+        self.assertFalse(panel.apply_btn.isEnabled())
+        self.assertFalse(panel.preset_combo.isEnabled())
+        self.assertFalse(panel.exposure_slider.isEnabled())
+
+        panel.set_image_available(True)
+
+        self.assertTrue(panel.apply_btn.isEnabled())
+        self.assertTrue(panel.preset_combo.isEnabled())
+        self.assertTrue(panel.exposure_slider.isEnabled())
+
     def test_thumbnail_size_never_rounds_down_to_zero(self):
         from src.ui.ui_utils import fit_thumbnail_size
 
