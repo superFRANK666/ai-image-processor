@@ -396,11 +396,13 @@ class AGICameraPanel(QWidget):
         self._frames: List[np.ndarray] = []
         self._wheel_blocker = WheelBlocker(self)
         self._has_selection = False
+        self._image_available = False
         self._pending_image = None
         self._multiview_images: List[str] = []  # 多视角图片路径列表
         self.image_db = None  # 图像数据库引用
         self._setup_ui()
         self._connect_signals()
+        self._update_generation_actions()
         self._update_export_actions()
 
         # 注意:不再使用全局事件过滤器，所有鼠标事件由 ClickableImageLabel 直接处理
@@ -620,6 +622,15 @@ class AGICameraPanel(QWidget):
 
         layout.addStretch()
 
+        self._image_dependent_widgets = [
+            self.point_mode_btn,
+            self.box_mode_btn,
+            self.path_mode_btn,
+            self.clear_selection_btn,
+            self.generate_3d_btn,
+            self.generate_anim_btn,
+        ]
+
     # 注意：eventFilter 和 _handle_mouse_* 方法已移除
     # 所有鼠标事件由 ClickableImageLabel 直接处理
 
@@ -668,6 +679,19 @@ class AGICameraPanel(QWidget):
         self.export_gif_btn.setEnabled(has_frames)
         self.export_video_btn.setEnabled(has_frames)
 
+    def _update_generation_actions(self):
+        """根据是否已有当前图像更新生成和选择控件状态。"""
+        for widget in self._image_dependent_widgets:
+            widget.setEnabled(self._image_available)
+        self.generate_object_3d_btn.setEnabled(self._image_available and self._has_selection)
+
+    def set_image_available(self, available: bool):
+        """设置当前图像上下文是否可用。"""
+        self._image_available = available
+        if not available:
+            self._has_selection = False
+        self._update_generation_actions()
+
     def _on_point_mode_toggled(self, checked: bool):
         """切换到点选模式"""
         if checked:
@@ -707,7 +731,7 @@ class AGICameraPanel(QWidget):
     def _on_clear_selection(self):
         """清除选择"""
         self._has_selection = False
-        self.generate_object_3d_btn.setEnabled(False)
+        self._update_generation_actions()
         self.selection_status.setText("提示: 点击图像中的物体进行选择")
         self.selection_status.setStyleSheet("color: #888;")
 
@@ -737,7 +761,7 @@ class AGICameraPanel(QWidget):
     def set_selection_result(self, success: bool, message: str = ""):
         """设置选择结果"""
         self._has_selection = success
-        self.generate_object_3d_btn.setEnabled(success)
+        self._update_generation_actions()
         if success:
             self.selection_status.setText("已选中物体 - 可以生成3D")
             self.selection_status.setStyleSheet("color: #4CAF50;")
@@ -786,6 +810,7 @@ class AGICameraPanel(QWidget):
     def set_image(self, image: np.ndarray):
         """设置图像用于物体选择"""
         print(f"[AGICameraPanel] set_image 调用, 图像尺寸: {image.shape}")
+        self._image_available = True
         self._pending_image = image.copy()  # 保存待设置的图像
         self._mesh = None
         self._frames = []
@@ -795,6 +820,7 @@ class AGICameraPanel(QWidget):
         print(f"[AGICameraPanel] image_view 尺寸: {self.image_view.width()}x{self.image_view.height()}")
         print(f"[AGICameraPanel] image_view 可见: {self.image_view.isVisible()}")
         self._on_clear_selection()
+        self._update_generation_actions()
         self._update_export_actions()
 
     def showEvent(self, event):

@@ -159,6 +159,31 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertFalse(panel.export_gif_btn.isEnabled())
         self.assertFalse(panel.export_video_btn.isEnabled())
 
+    def test_agi_generation_controls_follow_image_state(self):
+        from src.ui.agi_camera_panel import AGICameraPanel
+
+        panel = AGICameraPanel()
+
+        self.assertFalse(panel.generate_3d_btn.isEnabled())
+        self.assertFalse(panel.generate_anim_btn.isEnabled())
+        self.assertFalse(panel.point_mode_btn.isEnabled())
+        self.assertFalse(panel.generate_object_3d_btn.isEnabled())
+
+        panel.set_image_available(True)
+        self.assertTrue(panel.generate_3d_btn.isEnabled())
+        self.assertTrue(panel.generate_anim_btn.isEnabled())
+        self.assertTrue(panel.point_mode_btn.isEnabled())
+        self.assertFalse(panel.generate_object_3d_btn.isEnabled())
+
+        panel.set_selection_result(True)
+        self.assertTrue(panel.generate_object_3d_btn.isEnabled())
+
+        panel.set_image_available(False)
+        self.assertFalse(panel.generate_3d_btn.isEnabled())
+        self.assertFalse(panel.generate_anim_btn.isEnabled())
+        self.assertFalse(panel.point_mode_btn.isEnabled())
+        self.assertFalse(panel.generate_object_3d_btn.isEnabled())
+
 
 if __name__ == "__main__":
     unittest.main()

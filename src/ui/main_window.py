@@ -518,6 +518,8 @@ class MainWindow(QMainWindow):
             self._set_compare_checked(False)
         if hasattr(self, 'color_panel'):
             self.color_panel.set_image_available(has_image)
+        if hasattr(self, 'agi_panel'):
+            self.agi_panel.set_image_available(has_image)
 
     def open_image(self):
         """打开图像文件"""
