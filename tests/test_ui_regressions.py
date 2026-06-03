@@ -130,6 +130,35 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertIsNotNone(pixmap)
         self.assertFalse(pixmap.isNull())
 
+    def test_agi_export_buttons_follow_generated_state(self):
+        from src.ai import Mesh3D
+        from src.ui.agi_camera_panel import AGICameraPanel
+
+        panel = AGICameraPanel()
+        self.assertFalse(panel.export_model_btn.isEnabled())
+        self.assertFalse(panel.export_gif_btn.isEnabled())
+        self.assertFalse(panel.export_video_btn.isEnabled())
+
+        mesh = Mesh3D(
+            vertices=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+            faces=np.empty((0, 3), dtype=np.int32),
+            normals=np.array([[0.0, 0.0, 1.0]], dtype=np.float32),
+            colors=np.array([[1.0, 1.0, 1.0]], dtype=np.float32),
+        )
+        panel.set_mesh(mesh)
+        self.assertTrue(panel.export_model_btn.isEnabled())
+        self.assertFalse(panel.export_gif_btn.isEnabled())
+        self.assertFalse(panel.export_video_btn.isEnabled())
+
+        panel.set_animation([np.full((8, 8, 3), 127, dtype=np.uint8)])
+        self.assertTrue(panel.export_gif_btn.isEnabled())
+        self.assertTrue(panel.export_video_btn.isEnabled())
+
+        panel.set_image(np.full((8, 8, 3), 127, dtype=np.uint8))
+        self.assertFalse(panel.export_model_btn.isEnabled())
+        self.assertFalse(panel.export_gif_btn.isEnabled())
+        self.assertFalse(panel.export_video_btn.isEnabled())
+
 
 if __name__ == "__main__":
     unittest.main()

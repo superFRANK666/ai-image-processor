@@ -309,6 +309,9 @@ class AnimationPreview(QLabel):
         self._current_frame = 0
         if frames:
             self._show_frame(0)
+        else:
+            self.clear()
+            self.setText("预览区域\n生成3D模型后可在此查看")
 
     def _show_frame(self, index: int):
         """显示指定帧"""
@@ -398,6 +401,7 @@ class AGICameraPanel(QWidget):
         self.image_db = None  # 图像数据库引用
         self._setup_ui()
         self._connect_signals()
+        self._update_export_actions()
 
         # 注意:不再使用全局事件过滤器，所有鼠标事件由 ClickableImageLabel 直接处理
 
@@ -657,6 +661,13 @@ class AGICameraPanel(QWidget):
         self.export_gif_btn.clicked.connect(self._export_gif)
         self.export_video_btn.clicked.connect(self._export_video)
 
+    def _update_export_actions(self):
+        """根据当前生成结果更新导出按钮状态。"""
+        self.export_model_btn.setEnabled(self._mesh is not None)
+        has_frames = bool(self._frames)
+        self.export_gif_btn.setEnabled(has_frames)
+        self.export_video_btn.setEnabled(has_frames)
+
     def _on_point_mode_toggled(self, checked: bool):
         """切换到点选模式"""
         if checked:
@@ -776,11 +787,15 @@ class AGICameraPanel(QWidget):
         """设置图像用于物体选择"""
         print(f"[AGICameraPanel] set_image 调用, 图像尺寸: {image.shape}")
         self._pending_image = image.copy()  # 保存待设置的图像
+        self._mesh = None
+        self._frames = []
+        self.preview.set_frames([])
         self.image_view.set_image(image)
         print(f"[AGICameraPanel] image_view._image is None: {self.image_view._image is None}")
         print(f"[AGICameraPanel] image_view 尺寸: {self.image_view.width()}x{self.image_view.height()}")
         print(f"[AGICameraPanel] image_view 可见: {self.image_view.isVisible()}")
         self._on_clear_selection()
+        self._update_export_actions()
 
     def showEvent(self, event):
         """面板显示事件"""
@@ -798,6 +813,9 @@ class AGICameraPanel(QWidget):
         # 显示一个静态预览 (使用简单投影)
         if mesh is not None:
             self._show_mesh_preview(mesh)
+        else:
+            self.preview.set_frames([])
+        self._update_export_actions()
 
     def _show_mesh_preview(self, mesh: Mesh3D):
         """显示网格预览"""
@@ -825,8 +843,9 @@ class AGICameraPanel(QWidget):
 
     def set_animation(self, frames: List[np.ndarray]):
         """设置动画帧"""
-        self._frames = frames
-        self.preview.set_frames(frames)
+        self._frames = frames or []
+        self.preview.set_frames(self._frames)
+        self._update_export_actions()
 
     def get_current_mesh(self) -> Optional[Mesh3D]:
         """获取当前网格"""
