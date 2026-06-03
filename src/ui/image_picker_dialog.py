@@ -307,7 +307,8 @@ class ImagePickerDialog(QDialog):
         thumb_size = 120
         cols = max(1, panel_width // (thumb_size + 10))
 
-        for i, img_data in enumerate(images):
+        displayed_count = 0
+        for img_data in images:
             image_path = img_data.get("path", "")
             if not image_path or not Path(image_path).exists():
                 continue
@@ -320,10 +321,11 @@ class ImagePickerDialog(QDialog):
             if image_path in self._selected_paths:
                 thumb.set_selected(True)
 
-            row = i // cols
-            col = i % cols
+            row = displayed_count // cols
+            col = displayed_count % cols
             self.thumbnail_layout.addWidget(thumb, row, col)
             self._thumbnails.append(thumb)
+            displayed_count += 1
 
     def _on_thumbnail_clicked(self, path: str, selected: bool):
         """缩略图点击"""

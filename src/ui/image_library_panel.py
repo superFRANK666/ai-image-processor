@@ -330,8 +330,8 @@ class ImageLibraryPanel(QWidget):
             return
             
         images = self.image_db.get_images_by_group(group, limit=50) # 简单取前50张
-        self.show_search_results(images)
-        self.status_bar_update(len(images))
+        shown_count = self.show_search_results(images)
+        self.status_bar_update(shown_count)
 
     def status_bar_update(self, count):
          try:
@@ -357,22 +357,21 @@ class ImageLibraryPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-    def show_search_results(self, results: List[Dict[str, Any]]):
+    def show_search_results(self, results: List[Dict[str, Any]]) -> int:
         """显示搜索结果"""
         self._clear_thumbnails()
 
         if not results:
             self.status_label.setText("未找到匹配的图片")
-            return
-
-        self.status_label.setText(f"找到 {len(results)} 张相似图片")
+            return 0
 
         # 计算每行显示的数量
         panel_width = self.width() - 30
         thumb_size = 120
         cols = max(1, panel_width // (thumb_size + 5))
 
-        for i, result in enumerate(results):
+        displayed_count = 0
+        for result in results:
             image_path = result.get("path", "")
             if not image_path or not Path(image_path).exists():
                 continue
@@ -387,10 +386,11 @@ class ImageLibraryPanel(QWidget):
             thumb.rename_requested.connect(self._on_rename_requested_from_thumb)
             thumb.delete_requested.connect(self._on_delete_requested_from_thumb)
 
-            row = i // cols
-            col = i % cols
+            row = displayed_count // cols
+            col = displayed_count % cols
             self.thumbnail_layout.addWidget(thumb, row, col)
             self._thumbnails.append(thumb)
+            displayed_count += 1
 
             # 添加相似度标签
             similarity = result.get("similarity", 0)
@@ -403,6 +403,12 @@ class ImageLibraryPanel(QWidget):
             # 或者给ImageThumbnail增加显示名字的能力
             # thumb.data_id = result.get("id") # 存储ID方便操作
             # thumb.data_name = name
+        if displayed_count:
+            self.status_label.setText(f"找到 {displayed_count} 张相似图片")
+        else:
+            self.status_label.setText("未找到可显示的图片")
+
+        return displayed_count
 
     def _on_search(self):
         """执行搜索"""
