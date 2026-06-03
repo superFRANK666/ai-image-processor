@@ -70,13 +70,17 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertTrue(panel.exposure_slider.isEnabled())
 
     def test_thumbnail_size_never_rounds_down_to_zero(self):
-        from src.ui.ui_utils import fit_thumbnail_size
+        from src.ui.ui_utils import fit_thumbnail_size, fit_within_size
 
         self.assertEqual(fit_thumbnail_size(10000, 1, 120), (120, 1))
         self.assertEqual(fit_thumbnail_size(1, 10000, 120), (1, 120))
+        self.assertEqual(fit_within_size(10000, 1, 400, 350), (400, 1))
+        self.assertEqual(fit_within_size(1, 10000, 400, 350), (1, 350))
 
         with self.assertRaises(ValueError):
             fit_thumbnail_size(0, 100, 120)
+        with self.assertRaises(ValueError):
+            fit_within_size(100, 100, 0, 120)
 
     def test_missing_thumbnail_sources_do_not_leave_grid_gaps(self):
         from src.ui.image_library_panel import ImageLibraryPanel

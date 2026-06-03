@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 # 使用相对导入
 from ..ai import Mesh3D
-from .ui_utils import WheelBlocker
+from .ui_utils import WheelBlocker, fit_within_size
 from .image_picker_dialog import pick_images
 
 
@@ -91,11 +91,8 @@ class ClickableImageLabel(QWidget):
         if max_w <= 0 or max_h <= 0:
             return
 
-        scale = min(max_w / w, max_h / h)
-        self._display_scale = scale
-
-        new_w = int(w * scale)
-        new_h = int(h * scale)
+        new_w, new_h = fit_within_size(w, h, max_w, max_h)
+        self._display_scale = min(new_w / w, new_h / h)
 
         self._offset_x = (self.width() - new_w) // 2
         self._offset_y = (self.height() - new_h) // 2
