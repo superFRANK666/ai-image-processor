@@ -290,7 +290,7 @@ class ColorGradingPanel(QWidget):
         self.fade_slider.value_changed.connect(self._on_param_changed)
 
         # 重置按钮
-        self.reset_btn.clicked.connect(self.reset_params)
+        self.reset_btn.clicked.connect(lambda: self.reset_params())
 
         # 复制参数
         self.copy_params_btn.clicked.connect(self._copy_params)
@@ -384,10 +384,12 @@ class ColorGradingPanel(QWidget):
 
         self.blockSignals(False)
 
-    def reset_params(self):
+    def reset_params(self, emit_change: bool = True):
         """重置所有参数"""
+        self._debounce_timer.stop()
         self.set_params(ColorGradingParams())
-        self.params_changed.emit(ColorGradingParams())
+        if emit_change:
+            self.params_changed.emit(ColorGradingParams())
 
     def _copy_params(self):
         """复制参数到剪贴板"""

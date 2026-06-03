@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
         self._setup_toolbar()
         self._setup_statusbar()
         self._connect_signals()
+        self._update_action_states()
 
         # 应用样式
         self.setStyleSheet(get_dark_style())
@@ -347,15 +348,15 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        save_action = QAction("保存(&S)", self)
-        save_action.setShortcut(QKeySequence.Save)
-        save_action.triggered.connect(self.save_image)
-        file_menu.addAction(save_action)
+        self.save_action = QAction("保存(&S)", self)
+        self.save_action.setShortcut(QKeySequence.Save)
+        self.save_action.triggered.connect(self.save_image)
+        file_menu.addAction(self.save_action)
 
-        save_as_action = QAction("另存为...", self)
-        save_as_action.setShortcut(QKeySequence.SaveAs)
-        save_as_action.triggered.connect(self.save_image_as)
-        file_menu.addAction(save_as_action)
+        self.save_as_action = QAction("另存为...", self)
+        self.save_as_action.setShortcut(QKeySequence.SaveAs)
+        self.save_as_action.triggered.connect(self.save_image_as)
+        file_menu.addAction(self.save_as_action)
 
         file_menu.addSeparator()
 
@@ -367,15 +368,15 @@ class MainWindow(QMainWindow):
         # 编辑菜单
         edit_menu = menubar.addMenu("编辑(&E)")
 
-        undo_action = QAction("撤销(&Z)", self)
-        undo_action.setShortcut(QKeySequence.Undo)
-        undo_action.triggered.connect(self.undo)
-        edit_menu.addAction(undo_action)
+        self.undo_action = QAction("撤销(&Z)", self)
+        self.undo_action.setShortcut(QKeySequence.Undo)
+        self.undo_action.triggered.connect(self.undo)
+        edit_menu.addAction(self.undo_action)
 
-        reset_action = QAction("重置", self)
-        reset_action.setShortcut("Ctrl+R")
-        reset_action.triggered.connect(self.reset_image)
-        edit_menu.addAction(reset_action)
+        self.reset_action = QAction("重置", self)
+        self.reset_action.setShortcut("Ctrl+R")
+        self.reset_action.triggered.connect(self.reset_image)
+        edit_menu.addAction(self.reset_action)
 
         # 视图菜单
         view_menu = menubar.addMenu("视图(&V)")
@@ -422,24 +423,24 @@ class MainWindow(QMainWindow):
         toolbar.addAction(open_btn)
 
         # 保存
-        save_btn = QAction("保存", self)
-        save_btn.setToolTip("保存图像 (Ctrl+S)")
-        save_btn.triggered.connect(self.save_image)
-        toolbar.addAction(save_btn)
+        self.save_toolbar_action = QAction("保存", self)
+        self.save_toolbar_action.setToolTip("保存图像 (Ctrl+S)")
+        self.save_toolbar_action.triggered.connect(self.save_image)
+        toolbar.addAction(self.save_toolbar_action)
 
         toolbar.addSeparator()
 
         # 撤销
-        undo_btn = QAction("撤销", self)
-        undo_btn.setToolTip("撤销 (Ctrl+Z)")
-        undo_btn.triggered.connect(self.undo)
-        toolbar.addAction(undo_btn)
+        self.undo_toolbar_action = QAction("撤销", self)
+        self.undo_toolbar_action.setToolTip("撤销 (Ctrl+Z)")
+        self.undo_toolbar_action.triggered.connect(self.undo)
+        toolbar.addAction(self.undo_toolbar_action)
 
         # 重置
-        reset_btn = QAction("重置", self)
-        reset_btn.setToolTip("重置到原始图像 (Ctrl+R)")
-        reset_btn.triggered.connect(self.reset_image)
-        toolbar.addAction(reset_btn)
+        self.reset_toolbar_action = QAction("重置", self)
+        self.reset_toolbar_action.setToolTip("重置到原始图像 (Ctrl+R)")
+        self.reset_toolbar_action.triggered.connect(self.reset_image)
+        toolbar.addAction(self.reset_toolbar_action)
 
         toolbar.addSeparator()
 
@@ -489,6 +490,32 @@ class MainWindow(QMainWindow):
         self.library_panel.image_selected.connect(self.load_reference_image)
         self.library_panel.import_requested.connect(self.import_images)
 
+    def _set_compare_checked(self, checked: bool):
+        """同步对比按钮状态，避免切换图片时保留旧图对比。"""
+        if hasattr(self, 'compare_btn'):
+            self.compare_btn.blockSignals(True)
+            self.compare_btn.setChecked(checked)
+            self.compare_btn.blockSignals(False)
+
+    def _update_action_states(self):
+        """根据当前上下文更新菜单和工具栏可用状态。"""
+        has_image = self.current_image is not None
+        has_history = bool(self._history_stack)
+        for action_name in (
+            'save_action', 'save_as_action', 'reset_action',
+            'save_toolbar_action', 'reset_toolbar_action', 'compare_btn'
+        ):
+            action = getattr(self, action_name, None)
+            if action is not None:
+                action.setEnabled(has_image)
+
+        for action_name in ('undo_action', 'undo_toolbar_action'):
+            action = getattr(self, action_name, None)
+            if action is not None:
+                action.setEnabled(has_history)
+
+        if not has_image:
+            self._set_compare_checked(False)
 
     def open_image(self):
         """打开图像文件"""
@@ -515,6 +542,8 @@ class MainWindow(QMainWindow):
             self.current_image = image.copy()
             self.original_image = image.copy()
             self.current_file_path = file_path
+            self.image_viewer.set_compare_mode(None, None)
+            self._set_compare_checked(False)
 
             # 清空历史记录（新图像）
             self._clear_history()
@@ -527,13 +556,14 @@ class MainWindow(QMainWindow):
             self.image_info_label.setText(f"{Path(file_path).name} | {w}x{h}")
 
             # 重置调色面板
-            self.color_panel.reset_params()
+            self.color_panel.reset_params(emit_change=False)
 
             # 设置图像到AGI相机（仅当已加载时）
             self.agi_panel.set_image(image)
             if self.agi_camera is not None:
                 self.agi_camera.set_image(image)
 
+            self._update_action_states()
 
         except (ValueError, OSError, IOError) as e:
             # 捕获文件读取和图像处理相关的错误
@@ -583,9 +613,10 @@ class MainWindow(QMainWindow):
             if self.original_image is not None:
                 self.current_image = self.original_image.copy()
                 self.update_image_display()
-                self.color_panel.reset_params()
+                self.color_panel.reset_params(emit_change=False)
                 self._current_params = None
                 self.statusbar.showMessage("已恢复到原始图像", 2000)
+                self._update_action_states()
             return
 
         # 弹出上一步状态
@@ -600,9 +631,10 @@ class MainWindow(QMainWindow):
         if self._current_params is not None:
             self.color_panel.set_params(self._current_params)
         else:
-            self.color_panel.reset_params()
+            self.color_panel.reset_params(emit_change=False)
 
         self.statusbar.showMessage(f"已撤销 (剩余 {len(self._history_stack)} 步)", 2000)
+        self._update_action_states()
 
     def _save_history(self):
         """保存当前状态到历史记录"""
@@ -619,26 +651,31 @@ class MainWindow(QMainWindow):
         # 限制历史记录数量
         if len(self._history_stack) > self.MAX_HISTORY:
             self._history_stack.pop(0)
+        self._update_action_states()
 
     def _clear_history(self):
         """清空历史记录"""
         self._history_stack.clear()
         self._current_params = None
+        self._update_action_states()
 
     def reset_image(self):
         """重置图像"""
         if self.original_image is not None:
             self.current_image = self.original_image.copy()
             self.update_image_display()
-            self.color_panel.reset_params()
+            self.color_panel.reset_params(emit_change=False)
             # 清空历史记录
             self._clear_history()
+            self.statusbar.showMessage("已重置到原始图像", 2000)
 
     def toggle_compare(self, checked: bool):
         """切换对比视图"""
         if checked and self.original_image is not None:
             self.image_viewer.set_compare_mode(self.original_image, self.current_image)
         else:
+            if checked:
+                self._set_compare_checked(False)
             self.image_viewer.set_compare_mode(None, None)
 
     # def toggle_library(self, checked: bool): # 移除旧的切换方法
@@ -718,10 +755,12 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_pending_params'):
             self._current_params = self._pending_params
             self._pending_params = None
+        self._update_action_states()
 
     def _on_processing_error(self, error_msg):
         """处理错误回调"""
         self.progress_bar.hide()
+        self._update_action_states()
         QMessageBox.warning(self, "处理错误", error_msg)
 
     def process_text_command(self, text: str):
@@ -982,6 +1021,8 @@ class MainWindow(QMainWindow):
             self.current_image = ref_image.copy()
             self.original_image = ref_image.copy()
             self.current_file_path = image_path
+            self.image_viewer.set_compare_mode(None, None)
+            self._set_compare_checked(False)
             self.update_image_display()
 
             # 更新状态栏
@@ -994,7 +1035,9 @@ class MainWindow(QMainWindow):
                 self.agi_camera.set_image(ref_image)
 
             # 重置调色面板
-            self.color_panel.reset_params()
+            self.color_panel.reset_params(emit_change=False)
+            self._clear_history()
+            self._update_action_states()
 
             self.statusbar.showMessage(f"已加载图片: {Path(image_path).name}", 3000)
         else:
