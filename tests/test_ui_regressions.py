@@ -119,6 +119,17 @@ class ColorPanelRegressionTests(unittest.TestCase):
 
         self.assertEqual(warning.call_count, 2)
 
+    def test_agi_animation_preview_handles_extreme_aspect_ratio_frames(self):
+        from src.ui.agi_camera_panel import AnimationPreview
+
+        preview = AnimationPreview()
+        preview.resize(400, 350)
+        preview.set_frames([np.full((1, 10000, 3), 127, dtype=np.uint8)])
+
+        pixmap = preview.pixmap()
+        self.assertIsNotNone(pixmap)
+        self.assertFalse(pixmap.isNull())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 # 使用相对导入
 from ..ai import Mesh3D
-from .ui_utils import WheelBlocker, fit_within_size
+from .ui_utils import WheelBlocker, fit_thumbnail_size, fit_within_size
 from .image_picker_dialog import pick_images
 
 
@@ -322,8 +322,7 @@ class AnimationPreview(QLabel):
         max_size = min(self.width() - 10, self.height() - 10)
         if max_size <= 0:
             max_size = 100
-        scale = max_size / max(h, w)
-        new_w, new_h = int(w * scale), int(h * scale)
+        new_w, new_h = fit_thumbnail_size(w, h, max_size)
         frame = cv2.resize(frame, (new_w, new_h))
 
         # 转换为QPixmap - 确保数据独立拷贝避免悬垂指针
