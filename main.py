@@ -98,7 +98,7 @@ def main() -> None:
         from src.core.config import APP_VERSION
     except Exception as exc:
         logger.warning(f"无法读取版本配置: {exc}")
-        APP_VERSION = "1.0.0"
+        APP_VERSION = "1.1.0"
 
     print("========================================")
     print(f"   AI 影像处理软件 v{APP_VERSION}")
