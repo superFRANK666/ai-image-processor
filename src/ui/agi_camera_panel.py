@@ -3,6 +3,7 @@ AGI相机面板
 3D生成和动画预览
 支持物体选择
 """
+import logging
 import numpy as np
 from typing import Optional, List
 
@@ -16,13 +17,13 @@ from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QEvent
 from PySide6.QtGui import QPixmap, QImage, QMouseEvent, QPainter, QColor, QPen
 import cv2
 
-import sys
-from pathlib import Path
 # 使用相对导入
 from ..ai import Mesh3D
 from .ui_utils import WheelBlocker, fit_thumbnail_size, fit_within_size
 from .image_picker_dialog import pick_images
 
+
+logger = logging.getLogger(__name__)
 
 
 class ClickableImageLabel(QWidget):
@@ -153,7 +154,7 @@ class ClickableImageLabel(QWidget):
         """鼠标按下事件"""
         if event.button() == Qt.LeftButton:
             if self._image is None:
-                print("[ClickableImageLabel] 图像未加载，忽略点击")
+                logger.debug("[ClickableImageLabel] 图像未加载，忽略点击")
                 return
 
             screen_x, screen_y = event.pos().x(), event.pos().y()
@@ -164,7 +165,10 @@ class ClickableImageLabel(QWidget):
             self._press_img_pos = (img_x, img_y)
             self._is_dragging = False
 
-            print(f"[ClickableImageLabel] 鼠标按下: 屏幕({screen_x}, {screen_y}), 图像({img_x}, {img_y}), 模式: {self._selection_mode}")
+            logger.debug(
+                "[ClickableImageLabel] 鼠标按下: 屏幕(%s, %s), 图像(%s, %s), 模式: %s",
+                screen_x, screen_y, img_x, img_y, self._selection_mode
+            )
 
             # 如果是框选模式，准备框选
             if self._selection_mode == "box":
@@ -224,7 +228,10 @@ class ClickableImageLabel(QWidget):
         screen_x, screen_y = event.pos().x(), event.pos().y()
         img_x, img_y = self._screen_to_image_coords(screen_x, screen_y)
 
-        print(f"[ClickableImageLabel] 鼠标释放: 模式={self._selection_mode}, 拖动={self._is_dragging}")
+        logger.debug(
+            "[ClickableImageLabel] 鼠标释放: 模式=%s, 拖动=%s",
+            self._selection_mode, self._is_dragging
+        )
 
         if self._selection_mode == "box" and self._drawing_box:
             # 框选模式：发送框选信号
@@ -239,10 +246,13 @@ class ClickableImageLabel(QWidget):
                 y1, y2 = min(y1, y2), max(y1, y2)
                 # 只有当框选区域足够大时才发送信号
                 if abs(x2 - x1) > 5 and abs(y2 - y1) > 5:
-                    print(f"[ClickableImageLabel] 发送框选信号: ({x1}, {y1}) - ({x2}, {y2})")
+                    logger.debug(
+                        "[ClickableImageLabel] 发送框选信号: (%s, %s) - (%s, %s)",
+                        x1, y1, x2, y2
+                    )
                     self.box_selected.emit(x1, y1, x2, y2)
                 else:
-                    print("[ClickableImageLabel] 框选区域太小，忽略")
+                    logger.debug("[ClickableImageLabel] 框选区域太小，忽略")
 
             self._update_display()
 
@@ -252,10 +262,13 @@ class ClickableImageLabel(QWidget):
 
             if len(self._path_img_points) > 2:
                 # 闭合路径（自动连接起点和终点）
-                print(f"[ClickableImageLabel] 发送划线路径信号: {len(self._path_img_points)} 个点")
+                logger.debug(
+                    "[ClickableImageLabel] 发送划线路径信号: %s 个点",
+                    len(self._path_img_points)
+                )
                 self.path_selected.emit(self._path_img_points.copy())
             else:
-                print("[ClickableImageLabel] 划线路径点太少，忽略")
+                logger.debug("[ClickableImageLabel] 划线路径点太少，忽略")
 
             # 清除路径显示
             self._path_points = []
@@ -266,7 +279,7 @@ class ClickableImageLabel(QWidget):
             # 点选模式：发送点选信号
             if self._press_img_pos and not self._is_dragging:
                 x, y = self._press_img_pos
-                print(f"[ClickableImageLabel] 发送点选信号: ({x}, {y})")
+                logger.debug("[ClickableImageLabel] 发送点选信号: (%s, %s)", x, y)
                 self.clicked.emit(x, y)
 
         # 重置状态
@@ -702,7 +715,7 @@ class AGICameraPanel(QWidget):
             self.path_mode_btn.setChecked(False)
             self.path_mode_btn.blockSignals(False)
             self.image_view.set_selection_mode("point")
-            print("切换到点选模式")
+            logger.debug("切换到点选模式")
 
     def _on_box_mode_toggled(self, checked: bool):
         """切换到框选模式"""
@@ -714,7 +727,7 @@ class AGICameraPanel(QWidget):
             self.path_mode_btn.setChecked(False)
             self.path_mode_btn.blockSignals(False)
             self.image_view.set_selection_mode("box")
-            print("切换到框选模式")
+            logger.debug("切换到框选模式")
 
     def _on_path_mode_toggled(self, checked: bool):
         """切换到划线模式"""
@@ -726,7 +739,7 @@ class AGICameraPanel(QWidget):
             self.box_mode_btn.setChecked(False)
             self.box_mode_btn.blockSignals(False)
             self.image_view.set_selection_mode("path")
-            print("切换到划线模式")
+            logger.debug("切换到划线模式")
 
     def _on_clear_selection(self):
         """清除选择"""
@@ -741,17 +754,17 @@ class AGICameraPanel(QWidget):
 
     def _on_image_clicked(self, x: int, y: int):
         """图像被点击"""
-        print(f"[AGICameraPanel] 图像点击信号发出: ({x}, {y})")
+        logger.debug("[AGICameraPanel] 图像点击信号发出: (%s, %s)", x, y)
         self.object_selected.emit(x, y)
 
     def _on_box_selected(self, x1: int, y1: int, x2: int, y2: int):
         """框选区域"""
-        print(f"[AGICameraPanel] 框选信号发出: ({x1}, {y1}) - ({x2}, {y2})")
+        logger.debug("[AGICameraPanel] 框选信号发出: (%s, %s) - (%s, %s)", x1, y1, x2, y2)
         self.object_box_selected.emit(x1, y1, x2, y2)
 
     def _on_path_selected(self, path_points: list):
         """划线路径选择"""
-        print(f"[AGICameraPanel] 划线路径信号发出: {len(path_points)} 个点")
+        logger.debug("[AGICameraPanel] 划线路径信号发出: %s 个点", len(path_points))
         self.object_path_selected.emit(path_points)
 
     def _on_generate_object_3d(self):
@@ -809,16 +822,16 @@ class AGICameraPanel(QWidget):
 
     def set_image(self, image: np.ndarray):
         """设置图像用于物体选择"""
-        print(f"[AGICameraPanel] set_image 调用, 图像尺寸: {image.shape}")
+        logger.debug("[AGICameraPanel] set_image 调用, 图像尺寸: %s", image.shape)
         self._image_available = True
         self._pending_image = image.copy()  # 保存待设置的图像
         self._mesh = None
         self._frames = []
         self.preview.set_frames([])
         self.image_view.set_image(image)
-        print(f"[AGICameraPanel] image_view._image is None: {self.image_view._image is None}")
-        print(f"[AGICameraPanel] image_view 尺寸: {self.image_view.width()}x{self.image_view.height()}")
-        print(f"[AGICameraPanel] image_view 可见: {self.image_view.isVisible()}")
+        logger.debug("[AGICameraPanel] image_view._image is None: %s", self.image_view._image is None)
+        logger.debug("[AGICameraPanel] image_view 尺寸: %sx%s", self.image_view.width(), self.image_view.height())
+        logger.debug("[AGICameraPanel] image_view 可见: %s", self.image_view.isVisible())
         self._on_clear_selection()
         self._update_generation_actions()
         self._update_export_actions()
@@ -826,9 +839,9 @@ class AGICameraPanel(QWidget):
     def showEvent(self, event):
         """面板显示事件"""
         super().showEvent(event)
-        print(f"[AGICameraPanel] showEvent - 面板现在可见")
-        print(f"[AGICameraPanel] image_view 尺寸: {self.image_view.width()}x{self.image_view.height()}")
-        print(f"[AGICameraPanel] image_view 可见: {self.image_view.isVisible()}")
+        logger.debug("[AGICameraPanel] showEvent - 面板现在可见")
+        logger.debug("[AGICameraPanel] image_view 尺寸: %sx%s", self.image_view.width(), self.image_view.height())
+        logger.debug("[AGICameraPanel] image_view 可见: %s", self.image_view.isVisible())
         # 如果有待设置的图像，在显示后重新更新显示
         if hasattr(self, '_pending_image') and self._pending_image is not None:
             self.image_view._update_display()
