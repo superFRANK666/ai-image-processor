@@ -28,6 +28,9 @@ class FakeLibraryDb:
     def get_all_images(self, limit=100, offset=0):
         return self.images[offset:offset + limit]
 
+    def get_images_by_group(self, _group, limit=50):
+        return self.images[:limit]
+
     def search_by_text(self, text_query, top_k=5):
         query = text_query.lower()
         matches = [
@@ -306,6 +309,99 @@ class ColorPanelRegressionTests(unittest.TestCase):
 
             warning.assert_called_once()
             self.assertIn("无法打开文件位置", dialog.status_bar.text())
+
+    def test_image_picker_empty_state_disables_selection_actions(self):
+        from src.ui.image_picker_dialog import ImagePickerDialog
+
+        dialog = ImagePickerDialog()
+        self.addCleanup(dialog.close)
+
+        self.assertFalse(dialog.ok_btn.isEnabled())
+        self.assertFalse(dialog.clear_btn.isEnabled())
+        self.assertFalse(dialog.tab_widget.isTabEnabled(1))
+        self.assertFalse(dialog.search_btn.isEnabled())
+        self.assertEqual(dialog.status_label.text(), "图像库未初始化")
+
+        with mock.patch("src.ui.image_picker_dialog.QMessageBox.information") as information:
+            dialog._accept_selection()
+
+        information.assert_called_once()
+
+    def test_image_picker_browse_selection_updates_actions_and_display(self):
+        from src.ui.image_picker_dialog import ImagePickerDialog
+
+        with tempfile.TemporaryDirectory() as tmp:
+            first_path = Path(tmp) / "first.png"
+            second_path = Path(tmp) / "second.png"
+            cv2.imwrite(str(first_path), np.full((8, 8, 3), 63, dtype=np.uint8))
+            cv2.imwrite(str(second_path), np.full((8, 8, 3), 127, dtype=np.uint8))
+
+            dialog = ImagePickerDialog(multi_select=True)
+            self.addCleanup(dialog.close)
+            with mock.patch(
+                "src.ui.image_picker_dialog.QFileDialog.getOpenFileNames",
+                return_value=([str(first_path), str(second_path)], "")
+            ):
+                dialog._on_browse_files()
+
+            self.assertTrue(dialog.ok_btn.isEnabled())
+            self.assertTrue(dialog.clear_btn.isEnabled())
+            self.assertIn("first.png", dialog.selection_list.text())
+            self.assertIn("second.png", dialog.selection_list.text())
+
+            dialog._clear_selection()
+            self.assertFalse(dialog.ok_btn.isEnabled())
+            self.assertFalse(dialog.clear_btn.isEnabled())
+            self.assertEqual(dialog.selection_list.text(), "无")
+
+    def test_image_picker_library_refresh_and_search_statuses(self):
+        from src.ui.image_picker_dialog import ImagePickerDialog
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "valid.png"
+            missing_path = Path(tmp) / "missing.png"
+            cv2.imwrite(str(image_path), np.full((8, 8, 3), 127, dtype=np.uint8))
+            image_db = FakeLibraryDb([
+                {"id": "valid", "path": str(image_path), "metadata": {"name": "valid"}},
+                {"id": "missing", "path": str(missing_path), "metadata": {"name": "missing"}},
+            ])
+
+            dialog = ImagePickerDialog(image_db)
+            self.addCleanup(dialog.close)
+
+            self.assertTrue(dialog.tab_widget.isTabEnabled(1))
+            self.assertEqual(len(dialog._thumbnails), 1)
+            self.assertEqual(dialog.status_label.text(), "图像库: 2 张图片，当前显示 1 张")
+
+            dialog.search_input.setText("missing")
+            dialog._on_search()
+
+            self.assertEqual(len(dialog._thumbnails), 0)
+            self.assertEqual(dialog.status_label.text(), "未找到匹配 \"missing\" 的图片")
+
+    def test_image_picker_single_select_replaces_previous_thumbnail_choice(self):
+        from src.ui.image_picker_dialog import ImagePickerDialog
+
+        with tempfile.TemporaryDirectory() as tmp:
+            first_path = Path(tmp) / "first.png"
+            second_path = Path(tmp) / "second.png"
+            cv2.imwrite(str(first_path), np.full((8, 8, 3), 63, dtype=np.uint8))
+            cv2.imwrite(str(second_path), np.full((8, 8, 3), 127, dtype=np.uint8))
+            image_db = FakeLibraryDb([
+                {"id": "first", "path": str(first_path), "metadata": {"name": "first"}},
+                {"id": "second", "path": str(second_path), "metadata": {"name": "second"}},
+            ])
+
+            dialog = ImagePickerDialog(image_db, multi_select=False)
+            self.addCleanup(dialog.close)
+            first_thumb, second_thumb = dialog._thumbnails
+
+            dialog._on_thumbnail_clicked(first_thumb.image_path, True)
+            dialog._on_thumbnail_clicked(second_thumb.image_path, True)
+
+            self.assertEqual(dialog.get_selected_paths(), [str(second_path)])
+            self.assertFalse(first_thumb.is_selected())
+            self.assertTrue(second_thumb.is_selected())
 
 
 if __name__ == "__main__":

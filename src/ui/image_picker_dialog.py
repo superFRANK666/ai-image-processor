@@ -13,7 +13,7 @@ from ..utils.image_io import imread as imread_safe
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTabWidget, QGridLayout, QScrollArea, QLineEdit,
-    QFileDialog
+    QFileDialog, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QImage
@@ -219,7 +219,7 @@ class ImagePickerDialog(QDialog):
 
         self.ok_btn = QPushButton("确定")
         self.ok_btn.setMinimumWidth(100)
-        self.ok_btn.clicked.connect(self.accept)
+        self.ok_btn.clicked.connect(self._accept_selection)
         btn_layout.addWidget(self.ok_btn)
 
         self.cancel_btn = QPushButton("取消")
@@ -229,9 +229,38 @@ class ImagePickerDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
+        self._set_library_controls_enabled(self.image_db is not None)
+        self._update_selection_display()
+
         # 初始加载图像库
         if self.image_db:
             self._refresh_library()
+
+    def _set_library_controls_enabled(self, enabled: bool):
+        """同步图像库页签和搜索控件状态。"""
+        self.tab_widget.setTabEnabled(1, enabled)
+        self.search_input.setEnabled(enabled)
+        self.search_btn.setEnabled(enabled)
+        self.refresh_btn.setEnabled(enabled)
+        if not enabled:
+            self.status_label.setText("图像库未初始化")
+
+    def _clear_thumbnails(self):
+        """清除图像库缩略图。"""
+        for thumb in self._thumbnails:
+            thumb.deleteLater()
+        self._thumbnails.clear()
+
+        while self.thumbnail_layout.count():
+            item = self.thumbnail_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _sync_thumbnail_selection(self):
+        """根据当前选择同步缩略图高亮。"""
+        selected = set(self._selected_paths)
+        for thumb in self._thumbnails:
+            thumb.set_selected(thumb.image_path in selected)
 
     def _on_browse_files(self):
         """浏览文件系统"""
@@ -248,6 +277,7 @@ class ImagePickerDialog(QDialog):
             )
             if files:
                 self._selected_paths = files
+                self._sync_thumbnail_selection()
                 self._update_selection_display()
         else:
             file, _ = QFileDialog.getOpenFileName(
@@ -256,51 +286,54 @@ class ImagePickerDialog(QDialog):
             )
             if file:
                 self._selected_paths = [file]
+                self._sync_thumbnail_selection()
                 self._update_selection_display()
 
     def _on_search(self):
         """搜索图像库"""
         if not self.image_db:
+            self.status_label.setText("图像库未初始化")
             return
 
         query = self.search_input.text().strip()
         if query:
             results = self.image_db.search_by_text(query, top_k=50)
+            shown_count = self._show_thumbnails(
+                results,
+                empty_message=f"未找到匹配 \"{query}\" 的图片"
+            )
+            if shown_count:
+                self.status_label.setText(f"找到 {shown_count} 张匹配图片")
         else:
-            results = self.image_db.get_images_by_group("全部", limit=50)
-
-        self._show_thumbnails(results)
+            self._refresh_library()
 
     def _refresh_library(self):
         """刷新图像库"""
         if not self.image_db:
             self.status_label.setText("图像库未初始化")
+            self._set_library_controls_enabled(False)
             return
 
         try:
+            self._set_library_controls_enabled(True)
             count = self.image_db.get_image_count()
-            self.status_label.setText(f"图像库: {count} 张图片")
 
             # 加载前50张
             images = self.image_db.get_images_by_group("全部", limit=50)
-            self._show_thumbnails(images)
+            shown_count = self._show_thumbnails(images, empty_message="图像库暂无可显示图片")
+            if shown_count:
+                self.status_label.setText(f"图像库: {count} 张图片，当前显示 {shown_count} 张")
         except Exception as e:
+            self._clear_thumbnails()
             self.status_label.setText(f"加载失败: {e}")
 
-    def _show_thumbnails(self, images: List[Dict[str, Any]]):
+    def _show_thumbnails(self, images: List[Dict[str, Any]], empty_message: str = "未找到可显示的图片") -> int:
         """显示缩略图"""
-        # 清除现有缩略图
-        for thumb in self._thumbnails:
-            thumb.deleteLater()
-        self._thumbnails.clear()
-
-        while self.thumbnail_layout.count():
-            item = self.thumbnail_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        self._clear_thumbnails()
 
         if not images:
-            return
+            self.status_label.setText(empty_message)
+            return 0
 
         # 计算每行数量
         panel_width = self.thumbnail_widget.width() - 30
@@ -327,6 +360,13 @@ class ImagePickerDialog(QDialog):
             self._thumbnails.append(thumb)
             displayed_count += 1
 
+        if displayed_count:
+            self.status_label.setText(f"当前显示 {displayed_count} 张图片")
+        else:
+            self.status_label.setText(empty_message)
+
+        return displayed_count
+
     def _on_thumbnail_clicked(self, path: str, selected: bool):
         """缩略图点击"""
         if self.multi_select:
@@ -346,11 +386,14 @@ class ImagePickerDialog(QDialog):
             else:
                 self._selected_paths = []
 
+            self._sync_thumbnail_selection()
+
         self._update_selection_display()
 
     def _update_selection_display(self):
         """更新选择显示"""
-        if not self._selected_paths:
+        has_selection = bool(self._selected_paths)
+        if not has_selection:
             self.selection_list.setText("无")
             self.fs_path_label.setText("未选择文件")
         else:
@@ -364,12 +407,24 @@ class ImagePickerDialog(QDialog):
             self.selection_list.setText(display)
             self.fs_path_label.setText(display)
 
+        if hasattr(self, "ok_btn"):
+            self.ok_btn.setEnabled(has_selection)
+        if hasattr(self, "clear_btn"):
+            self.clear_btn.setEnabled(has_selection)
+
     def _clear_selection(self):
         """清空选择"""
         self._selected_paths = []
-        for thumb in self._thumbnails:
-            thumb.set_selected(False)
+        self._sync_thumbnail_selection()
         self._update_selection_display()
+
+    def _accept_selection(self):
+        """只允许带有效选择关闭对话框。"""
+        if not self._selected_paths:
+            QMessageBox.information(self, "请选择图片", "请先选择至少一张图片")
+            self._update_selection_display()
+            return
+        self.accept()
 
     def get_selected_paths(self) -> List[str]:
         """获取选中的路径"""
