@@ -531,6 +531,32 @@ class ColorPanelRegressionTests(unittest.TestCase):
             self.assertFalse(first_thumb.is_selected())
             self.assertTrue(second_thumb.is_selected())
 
+    def test_image_library_unavailable_database_disables_library_actions(self):
+        from src.ui.image_library_panel import ImageLibraryPanel
+
+        panel = ImageLibraryPanel()
+        self.addCleanup(panel.close)
+
+        self.assertFalse(panel.search_input.isEnabled())
+        self.assertFalse(panel.search_btn.isEnabled())
+        self.assertFalse(panel.refresh_btn.isEnabled())
+        self.assertFalse(panel.rebuild_btn.isEnabled())
+        self.assertFalse(panel.new_group_btn.isEnabled())
+        self.assertFalse(panel.group_combo.isEnabled())
+        self.assertTrue(panel.import_btn.isEnabled())
+        self.assertEqual(panel.status_label.text(), "图像库未初始化")
+        self.assertEqual(panel.search_input.placeholderText(), "图像库加载后可搜索...")
+
+        panel.set_database(FakeLibraryDb([]))
+
+        self.assertTrue(panel.search_input.isEnabled())
+        self.assertTrue(panel.search_btn.isEnabled())
+        self.assertTrue(panel.refresh_btn.isEnabled())
+        self.assertTrue(panel.rebuild_btn.isEnabled())
+        self.assertTrue(panel.new_group_btn.isEnabled())
+        self.assertTrue(panel.group_combo.isEnabled())
+        self.assertEqual(panel.search_input.placeholderText(), "搜索图像...")
+
     def test_image_library_group_names_are_validated_and_normalized(self):
         from src.ui.image_library_panel import ImageLibraryPanel
 

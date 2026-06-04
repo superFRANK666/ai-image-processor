@@ -307,9 +307,11 @@ class ImageLibraryPanel(QWidget):
 
         scroll_area.setWidget(self.thumbnail_widget)
         layout.addWidget(scroll_area)
+        self._update_library_controls()
 
     def refresh(self):
         """刷新图像列表"""
+        self._update_library_controls()
         # 更新分组
         current_group = self.group_combo.currentText()
         group_error = None
@@ -338,6 +340,24 @@ class ImageLibraryPanel(QWidget):
 
         if group_error:
             self.status_label.setText(group_error)
+
+    def _update_library_controls(self):
+        """根据图像库是否可用同步检索和管理控件状态。"""
+        available = self.image_db is not None
+        for widget in (
+                self.search_input,
+                self.group_combo,
+                self.new_group_btn,
+                self.search_btn,
+                self.refresh_btn,
+                self.rebuild_btn):
+            widget.setEnabled(available)
+
+        self.search_input.setPlaceholderText(
+            "搜索图像..." if available else "图像库加载后可搜索..."
+        )
+        if not available:
+            self.status_label.setText("图像库未初始化")
 
     def _load_images(self, group: str):
         """加载特定分组图像"""
