@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -24,14 +25,17 @@ class FakeLibraryDb:
             groups=None,
             fail_search=False,
             fail_update_ids=None,
-            fail_group_ops=None):
+            fail_group_ops=None,
+            fail_add_names=None):
         self.images = list(images)
         self.fail_remove_ids = set(fail_remove_ids or [])
         self.fail_update_ids = set(fail_update_ids or [])
         self.fail_group_ops = set(fail_group_ops or [])
+        self.fail_add_names = set(fail_add_names or [])
         self.fail_search = fail_search
         self.groups = list(groups or ["默认"])
         self.removed = []
+        self.added_images = []
         self.added_groups = []
         self.renamed_groups = []
         self.deleted_groups = []
@@ -91,6 +95,37 @@ class FakeLibraryDb:
             raise RuntimeError("cannot rename")
         self.renamed_groups.append((old_name, new_name))
         self.groups = [new_name if group == old_name else group for group in self.groups]
+
+    def add_image(self, path, group="默认"):
+        if Path(path).name in self.fail_add_names:
+            raise RuntimeError("decode failed")
+        self.added_images.append((str(path), group))
+
+
+class FakeProgress:
+    def __init__(self):
+        self.values = []
+
+    def emit(self, value):
+        self.values.append(value)
+
+
+class FakeWorker:
+    def __init__(self, stop_requested=False):
+        self._stop_requested = stop_requested
+        self.progress = FakeProgress()
+
+    @property
+    def stop_requested(self):
+        return self._stop_requested
+
+
+class FakeStatusBar:
+    def __init__(self):
+        self.messages = []
+
+    def showMessage(self, message, timeout=0):
+        self.messages.append((message, timeout))
 
 
 @unittest.skipUnless(QApplication is not None, "PySide6 is not available")
@@ -564,6 +599,106 @@ class ColorPanelRegressionTests(unittest.TestCase):
 
             self.assertEqual(emitted, [("ok", "old", "")])
             self.assertEqual(thumbnail.img_name, "old")
+
+    def test_batch_operation_result_formats_user_summary(self):
+        from src.ui.main_window import BatchOperationResult
+
+        result = BatchOperationResult(total=4, success=2, canceled=True)
+        result.add_failure("bad-one.png", RuntimeError("decode failed"))
+        result.add_failure("bad-two.png", RuntimeError("missing metadata"))
+
+        self.assertEqual(result.failed_count, 2)
+        self.assertTrue(result.has_issues)
+        self.assertEqual(result.status_message("导入"), "导入: 成功 2/4 张，失败 2 张，已取消")
+        self.assertIn("失败详情:", result.detail_message("导入"))
+        self.assertIn("bad-one.png: decode failed", result.detail_message("导入"))
+
+    def test_main_window_batch_import_and_index_collect_failures(self):
+        from src.ui.main_window import MainWindow
+
+        image_db = FakeLibraryDb([], fail_add_names={"bad.png"})
+        fake_window = SimpleNamespace(image_db=image_db)
+        worker = FakeWorker()
+
+        import_result = MainWindow._run_import_batch(
+            fake_window,
+            ["good.png", "bad.png"],
+            "默认",
+            worker
+        )
+
+        self.assertEqual(import_result.total, 2)
+        self.assertEqual(import_result.success, 1)
+        self.assertEqual(import_result.failed_count, 1)
+        self.assertEqual(worker.progress.values, [1, 2])
+        self.assertEqual(image_db.added_images, [("good.png", "默认")])
+
+        index_result = MainWindow._run_index_batch(
+            fake_window,
+            [Path("good.png"), Path("bad.png")],
+            FakeWorker()
+        )
+
+        self.assertEqual(index_result.success, 1)
+        self.assertEqual(index_result.failed_count, 1)
+
+    def test_main_window_batch_stops_cleanly_when_worker_is_canceled(self):
+        from src.ui.main_window import MainWindow
+
+        image_db = FakeLibraryDb([])
+        fake_window = SimpleNamespace(image_db=image_db)
+
+        result = MainWindow._run_import_batch(
+            fake_window,
+            ["first.png", "second.png"],
+            "默认",
+            FakeWorker(stop_requested=True)
+        )
+
+        self.assertTrue(result.canceled)
+        self.assertEqual(result.success, 0)
+        self.assertEqual(image_db.added_images, [])
+
+    def test_main_window_supported_folder_scan_is_unique_and_sorted(self):
+        from src.ui.main_window import MainWindow
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "b.PNG").write_bytes(b"data")
+            (root / "a.jpg").write_bytes(b"data")
+            (root / "notes.txt").write_text("skip")
+
+            files = MainWindow._collect_supported_image_files(object(), str(root))
+
+            self.assertEqual([path.name for path in files], ["a.jpg", "b.PNG"])
+
+            with self.assertRaises(ValueError):
+                MainWindow._collect_supported_image_files(object(), str(root / "missing"))
+
+    def test_main_window_batch_completion_uses_visible_feedback(self):
+        from src.ui.main_window import BatchOperationResult, MainWindow
+
+        fake_window = SimpleNamespace(statusbar=FakeStatusBar())
+        success = BatchOperationResult(total=1, success=1)
+
+        with mock.patch("src.ui.main_window.QMessageBox.information") as information:
+            MainWindow._show_batch_completion(
+                fake_window,
+                "导入",
+                success,
+                show_success_dialog=True
+            )
+
+        information.assert_called_once()
+        self.assertEqual(fake_window.statusbar.messages[-1], ("导入: 成功 1/1 张", 3000))
+
+        failed = BatchOperationResult(total=2, success=1)
+        failed.add_failure("bad.png", RuntimeError("decode failed"))
+        with mock.patch("src.ui.main_window.QMessageBox.warning") as warning:
+            MainWindow._show_batch_completion(fake_window, "索引", failed)
+
+        warning.assert_called_once()
+        self.assertEqual(fake_window.statusbar.messages[-1], ("索引: 成功 1/2 张，失败 1 张", 5000))
 
 
 if __name__ == "__main__":

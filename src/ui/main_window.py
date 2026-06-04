@@ -2,7 +2,9 @@
 主窗口
 AI全模态影像处理软件主界面
 """
+import logging
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 import numpy as np
@@ -33,6 +35,55 @@ from ..core.model_manager import ModelManager
 # 延迟导入 AI 模块（类型检查时导入,运行时延迟）
 if TYPE_CHECKING:
     from ..ai import ColorGradingEngine, NLPColorParser, AGICamera, ImageIndexDatabase, StyleAnalyzer
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BatchOperationResult:
+    """Result summary for image import/index batch jobs."""
+    total: int
+    success: int = 0
+    failures: list[str] = field(default_factory=list)
+    canceled: bool = False
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.failures)
+
+    @property
+    def has_issues(self) -> bool:
+        return self.canceled or self.failed_count > 0
+
+    def add_failure(self, path, error):
+        label = Path(path).name or str(path)
+        self.failures.append(f"{label}: {error}")
+
+    def status_message(self, action: str) -> str:
+        parts = [f"{action}: 成功 {self.success}/{self.total} 张"]
+        if self.failed_count:
+            parts.append(f"失败 {self.failed_count} 张")
+        if self.canceled:
+            parts.append("已取消")
+        return "，".join(parts)
+
+    def detail_message(self, action: str) -> str:
+        lines = [
+            f"{action}完成。",
+            f"成功: {self.success}/{self.total} 张",
+        ]
+        if self.failed_count:
+            lines.append(f"失败: {self.failed_count} 张")
+        if self.canceled:
+            lines.append("状态: 已取消")
+        if self.failures:
+            lines.append("")
+            lines.append("失败详情:")
+            lines.extend(self.failures[:5])
+            if self.failed_count > 5:
+                lines.append(f"...另有 {self.failed_count - 5} 张失败")
+        return "\n".join(lines)
 
 
 class ProcessingThread(QThread):
@@ -767,6 +818,84 @@ class MainWindow(QMainWindow):
         self._update_action_states()
         QMessageBox.warning(self, "处理错误", error_msg)
 
+    def _coerce_batch_result(self, result) -> BatchOperationResult:
+        """Accept old integer callbacks and new structured batch results."""
+        if isinstance(result, BatchOperationResult):
+            return result
+        count = int(result or 0)
+        return BatchOperationResult(total=count, success=count)
+
+    def _show_batch_completion(
+            self,
+            action: str,
+            result: BatchOperationResult,
+            *,
+            show_success_dialog: bool = False):
+        """Show a concise batch summary in the status bar and, when needed, a dialog."""
+        timeout = 5000 if result.has_issues else 3000
+        self.statusbar.showMessage(result.status_message(action), timeout)
+
+        if result.has_issues:
+            QMessageBox.warning(self, f"{action}未完全完成", result.detail_message(action))
+        elif show_success_dialog:
+            QMessageBox.information(self, f"{action}完成", result.detail_message(action))
+
+    def _collect_supported_image_files(self, folder_path: str) -> list[Path]:
+        """Return unique, top-level supported image files in a folder."""
+        folder = Path(folder_path)
+        if not folder.exists() or not folder.is_dir():
+            raise ValueError(f"文件夹不存在: {folder}")
+
+        supported_suffixes = {fmt.lower() for fmt in SUPPORTED_FORMATS}
+        unique = {}
+        for path in folder.iterdir():
+            if not path.is_file() or path.suffix.lower() not in supported_suffixes:
+                continue
+            key = str(path.resolve()).casefold()
+            unique[key] = path
+
+        return sorted(unique.values(), key=lambda item: item.name.casefold())
+
+    def _run_import_batch(self, file_paths: list, group: str, worker=None) -> BatchOperationResult:
+        """Import images and collect per-file failures for user-facing feedback."""
+        result = BatchOperationResult(total=len(file_paths))
+        for i, path in enumerate(file_paths):
+            if worker and worker.stop_requested:
+                result.canceled = True
+                logger.debug("Import batch canceled before %s", path)
+                break
+            try:
+                self.image_db.add_image(path, group=group)
+                result.success += 1
+            except (OSError, ValueError, RuntimeError) as e:
+                result.add_failure(path, e)
+                logger.debug("Failed to import %s: %s", path, e)
+
+            if worker:
+                worker.progress.emit(i + 1)
+
+        return result
+
+    def _run_index_batch(self, image_files: list[Path], worker=None) -> BatchOperationResult:
+        """Index images and collect per-file failures for user-facing feedback."""
+        result = BatchOperationResult(total=len(image_files))
+        for i, img_path in enumerate(image_files):
+            if worker and worker.stop_requested:
+                result.canceled = True
+                logger.debug("Index batch canceled before %s", img_path)
+                break
+            try:
+                self.image_db.add_image(str(img_path))
+                result.success += 1
+            except (OSError, ValueError, RuntimeError) as e:
+                result.add_failure(img_path, e)
+                logger.debug("Failed to index %s: %s", img_path, e)
+
+            if worker:
+                worker.progress.emit(i + 1)
+
+        return result
+
     def process_text_command(self, text: str):
         """处理文本命令（异步）"""
         if self.original_image is None:
@@ -854,6 +983,7 @@ class MainWindow(QMainWindow):
     def import_images(self, file_paths: list, group: str = "默认"):
         """导入图像到库"""
         if not file_paths:
+            self.statusbar.showMessage("没有可导入的图片", 3000)
             return
 
         if not self._ensure_model('image_db'):
@@ -869,26 +999,12 @@ class MainWindow(QMainWindow):
         worker = None
 
         def process_import():
-            success_count = 0
-            for i, path in enumerate(file_paths):
-                if worker and worker.stop_requested:
-                    print("[MainWindow] 导入线程接收到取消请求，提前中断")
-                    break
-                try:
-                    self.image_db.add_image(path, group=group)
-                    success_count += 1
-                except (OSError, ValueError, RuntimeError) as e:
-                    # 捕获文件和数据库相关错误
-                    print(f"导入失败 {path}: {e}")
-                
-                if worker:
-                    worker.progress.emit(i + 1)
-            return success_count
+            return self._run_import_batch(file_paths, group, worker)
 
         worker = ProcessingThread(process_import)
         self.thread = worker
         worker.progress.connect(self.progress_bar.setValue)
-        worker.finished.connect(lambda n: self._on_import_finished(n))
+        worker.finished.connect(self._on_import_finished)
         worker.error.connect(self._on_processing_error)
         worker.start()
 
@@ -904,14 +1020,12 @@ class MainWindow(QMainWindow):
         # 关闭后刷新面板
         self.library_panel.refresh()
 
-    def _on_import_finished(self, count: int):
+    def _on_import_finished(self, result):
         """导入完成回调"""
+        batch_result = self._coerce_batch_result(result)
         self.progress_bar.hide()
         self.library_panel.refresh()
-        self.statusbar.showMessage(f"成功导入 {count} 张图片", 3000)
-        # 如果管理器打开着，它也许需要刷新，但这是一个模态对话框，通常关闭后刷新即可
-        # 或者可以发送信号通知
-        QMessageBox.information(self, "导入完成", f"已成功导入 {count} 张图片到图像库")
+        self._show_batch_completion("导入", batch_result, show_success_dialog=True)
 
     def find_similar_images(self):
         """查找相似风格图像（混合搜索）"""
@@ -1101,11 +1215,11 @@ class MainWindow(QMainWindow):
 
     def index_folder(self, folder_path: str):
         """索引文件夹中的图像"""
-        folder = Path(folder_path)
-        image_files = []
-        for fmt in SUPPORTED_FORMATS:
-            image_files.extend(folder.glob(f"*{fmt}"))
-            image_files.extend(folder.glob(f"*{fmt.upper()}"))
+        try:
+            image_files = self._collect_supported_image_files(folder_path)
+        except ValueError as e:
+            QMessageBox.warning(self, "文件夹不可用", str(e))
+            return
 
         if not image_files:
             QMessageBox.information(self, "提示", "文件夹中没有支持的图像文件")
@@ -1119,36 +1233,26 @@ class MainWindow(QMainWindow):
 
         self.progress_bar.show()
         self.progress_bar.setRange(0, len(image_files))
+        self.statusbar.showMessage(f"准备索引 {len(image_files)} 张图片...")
 
         worker = None
 
         def index_images():
-            success_count = 0
-            for i, img_path in enumerate(image_files):
-                if worker and worker.stop_requested:
-                    print("[MainWindow] 索引线程接收到取消请求，提前中断")
-                    break
-                try:
-                    self.image_db.add_image(str(img_path))
-                    success_count += 1
-                except (OSError, ValueError, RuntimeError) as e:
-                    print(f"索引失败 {img_path}: {e}")
-                if worker:
-                    worker.progress.emit(i + 1)
-            return success_count
+            return self._run_index_batch(image_files, worker)
 
         worker = ProcessingThread(index_images)
         self.thread = worker
         worker.progress.connect(self.progress_bar.setValue)
-        worker.finished.connect(lambda n: self._on_index_finished(n))
+        worker.finished.connect(self._on_index_finished)
         worker.error.connect(self._on_processing_error)
         worker.start()
 
-    def _on_index_finished(self, count: int):
+    def _on_index_finished(self, result):
         """索引完成回调"""
+        batch_result = self._coerce_batch_result(result)
         self.progress_bar.hide()
         self.library_panel.refresh()
-        self.statusbar.showMessage(f"已索引 {count} 张图像", 3000)
+        self._show_batch_completion("索引", batch_result)
 
     def generate_3d(self, params: dict):
         """生成3D模型"""
