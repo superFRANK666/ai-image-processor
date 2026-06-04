@@ -12,7 +12,8 @@ from ..utils.image_io import imread as imread_safe
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QGridLayout, QLineEdit, QMenu, QComboBox, QInputDialog
+    QScrollArea, QGridLayout, QLineEdit, QMenu, QComboBox, QInputDialog,
+    QMessageBox
 )
 from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtGui import QPixmap, QImage, QCursor
@@ -23,6 +24,9 @@ from .ui_utils import fit_thumbnail_size
 # 类型检查时导入（不影响运行时）
 if TYPE_CHECKING:
     from ..ai import ImageIndexDatabase
+
+
+RESERVED_GROUP_NAMES = {"全部", "默认"}
 
 
 class ImageThumbnailWidget(QWidget):
@@ -134,9 +138,14 @@ class ImageThumbnailWidget(QWidget):
 
     def _start_rename(self):
         new_name, ok = QInputDialog.getText(self, "重命名", "输入新名称:", text=self.img_name)
-        if ok and new_name and new_name != self.img_name:
-            self.rename_requested.emit(self.img_id, self.img_name, new_name)
-            self.img_name = new_name
+        if not ok:
+            return
+
+        normalized = str(new_name).strip()
+        if normalized != self.img_name:
+            self.rename_requested.emit(self.img_id, self.img_name, normalized)
+        if normalized:
+            self.img_name = normalized
             font_metrics = self.name_label.fontMetrics()
             elided_text = font_metrics.elidedText(self.img_name, Qt.ElideMiddle, self.img_label.width())
             self.name_label.setText(elided_text)
@@ -303,12 +312,16 @@ class ImageLibraryPanel(QWidget):
         """刷新图像列表"""
         # 更新分组
         current_group = self.group_combo.currentText()
+        group_error = None
         self.group_combo.blockSignals(True)
         self.group_combo.clear()
         self.group_combo.addItem("全部")
         if self.image_db:
-             groups = self.image_db.get_groups()
-             self.group_combo.addItems(groups)
+            try:
+                groups = self.image_db.get_groups()
+                self.group_combo.addItems(groups)
+            except Exception as e:
+                group_error = f"加载分组失败: {e}"
         
         index = self.group_combo.findText(current_group)
         if index >= 0:
@@ -323,13 +336,22 @@ class ImageLibraryPanel(QWidget):
         else:
              self._load_images(current_filter)
 
+        if group_error:
+            self.status_label.setText(group_error)
+
     def _load_images(self, group: str):
         """加载特定分组图像"""
         self._clear_thumbnails()
         if not self.image_db:
+            self.status_label.setText("图像库未初始化")
             return
-            
-        images = self.image_db.get_images_by_group(group, limit=50) # 简单取前50张
+
+        try:
+            images = self.image_db.get_images_by_group(group, limit=50) # 简单取前50张
+        except Exception as e:
+            self.status_label.setText(f"加载图片失败: {e}")
+            return
+
         shown_count = self.show_search_results(images)
         self.status_bar_update(shown_count)
 
@@ -422,7 +444,11 @@ class ImageLibraryPanel(QWidget):
             self.status_label.setText("图像库未初始化")
             return
 
-        results = self.image_db.search_by_text(query, top_k=20)
+        try:
+            results = self.image_db.search_by_text(query, top_k=20)
+        except Exception as e:
+            self.status_label.setText(f"搜索失败: {e}")
+            return
 
         if not results:
             self.status_label.setText(f"未找到匹配 \"{query}\" 的图片")
@@ -449,10 +475,27 @@ class ImageLibraryPanel(QWidget):
 
     def _on_rename_requested_from_thumb(self, img_id, old_name, new_name):
         """缩略图请求重命名"""
-        if self.image_db:
-             self.image_db.update_image_metadata(img_id, {"name": new_name})
-             # 这里不需要刷新整个列表，因为widget自己已经更新了文字
-             self.status_label.setText(f"已重命名: {old_name} -> {new_name}")
+        normalized = str(new_name).strip()
+        if not normalized:
+            QMessageBox.warning(self, "重命名失败", "名称不能为空")
+            self.refresh()
+            self.status_label.setText("名称不能为空")
+            return
+
+        if not self.image_db:
+            self.status_label.setText("图像库未初始化")
+            return
+
+        try:
+            self.image_db.update_image_metadata(img_id, {"name": normalized})
+        except Exception as e:
+            QMessageBox.warning(self, "重命名失败", f"无法重命名图片:\n{e}")
+            self.refresh()
+            self.status_label.setText("重命名失败")
+            return
+
+        # 这里不需要刷新整个列表，因为widget自己已经更新了文字
+        self.status_label.setText(f"已重命名: {old_name} -> {normalized}")
 
     def _on_delete_requested_from_thumb(self, img_id):
         """缩略图请求删除"""
@@ -460,14 +503,20 @@ class ImageLibraryPanel(QWidget):
         
     def _delete_image(self, img_id):
         """删除图像逻辑"""
-        from PySide6.QtWidgets import QMessageBox
         if QMessageBox.question(self, "确认删除", "确定要删除这张图片吗？") != QMessageBox.Yes:
             return
             
         if self.image_db:
-            self.image_db.remove_image(img_id)
+            try:
+                self.image_db.remove_image(img_id)
+            except Exception as e:
+                QMessageBox.warning(self, "删除失败", f"无法从库中删除图片:\n{e}")
+                self.status_label.setText("删除失败")
+                return
             self.refresh()
             self.status_label.setText("已删除图像")
+        else:
+            self.status_label.setText("图像库未初始化")
             
     def keyPressEvent(self, event):
         """键盘事件"""
@@ -516,28 +565,45 @@ class ImageLibraryPanel(QWidget):
 
     def _on_new_group(self):
         """新建分组"""
+        if not self.image_db:
+            QMessageBox.warning(self, "新建分组失败", "图像库未初始化")
+            self.status_label.setText("图像库未初始化")
+            return
+
         name, ok = QInputDialog.getText(self, "新建分组", "请输入分组名称:")
-        if ok and name:
-             # 添加到下拉框
-             self.group_combo.blockSignals(True)
-             if self.group_combo.findText(name) == -1:
-                 self.group_combo.addItem(name)
-             self.group_combo.setCurrentText(name)
-             self.group_combo.blockSignals(False)
+        if not ok:
+            return
 
-             # 持久化保存分组到数据库
-             if self.image_db:
-                 self.image_db.add_group(name)
+        normalized, error = self._validate_group_name(name)
+        if error:
+            QMessageBox.warning(self, "新建分组失败", error)
+            self.status_label.setText(error)
+            return
 
-             # 刷新显示
-             self._load_images(name)
+        try:
+            self.image_db.add_group(normalized)
+        except Exception as e:
+            QMessageBox.warning(self, "新建分组失败", f"无法创建分组:\n{e}")
+            self.status_label.setText("新建分组失败")
+            return
+
+        # 添加到下拉框
+        self.group_combo.blockSignals(True)
+        if self.group_combo.findText(normalized) == -1:
+            self.group_combo.addItem(normalized)
+        self.group_combo.setCurrentText(normalized)
+        self.group_combo.blockSignals(False)
+
+        # 刷新显示
+        self._load_images(normalized)
+        self.status_label.setText(f"已创建分组: {normalized}")
 
     def _on_group_context_menu(self, pos):
         """分组下拉框右键菜单"""
         current_group = self.group_combo.currentText()
 
         # 不允许删除 "全部" 和 "默认" 分组
-        if current_group in ["全部", "默认"]:
+        if current_group in RESERVED_GROUP_NAMES:
             return
 
         menu = QMenu(self)
@@ -552,7 +618,8 @@ class ImageLibraryPanel(QWidget):
 
     def _delete_group(self, group_name: str):
         """删除分组"""
-        from PySide6.QtWidgets import QMessageBox
+        if group_name in RESERVED_GROUP_NAMES:
+            return
 
         # 确认删除
         result = QMessageBox.question(
@@ -566,7 +633,12 @@ class ImageLibraryPanel(QWidget):
 
         # 从数据库删除分组（移动图片到默认分组）
         if self.image_db:
-            self.image_db.delete_group(group_name)
+            try:
+                self.image_db.delete_group(group_name)
+            except Exception as e:
+                QMessageBox.warning(self, "删除分组失败", f"无法删除分组:\n{e}")
+                self.status_label.setText("删除分组失败")
+                return
 
         # 从下拉框移除
         index = self.group_combo.findText(group_name)
@@ -581,19 +653,76 @@ class ImageLibraryPanel(QWidget):
 
     def _rename_group(self, old_name: str):
         """重命名分组"""
+        if old_name in RESERVED_GROUP_NAMES:
+            return
+
         new_name, ok = QInputDialog.getText(self, "重命名分组", "请输入新名称:", text=old_name)
-        if ok and new_name and new_name != old_name:
-            # 更新数据库
-            if self.image_db:
-                self.image_db.rename_group(old_name, new_name)
+        if not ok:
+            return
 
-            # 更新下拉框
-            index = self.group_combo.findText(old_name)
-            if index >= 0:
-                self.group_combo.setItemText(index, new_name)
+        normalized, error = self._validate_group_name(new_name, current_name=old_name)
+        if error:
+            QMessageBox.warning(self, "重命名分组失败", error)
+            self.status_label.setText(error)
+            return
+        if normalized == old_name:
+            return
 
-            self.refresh()
-            self.status_label.setText(f"已重命名分组: {old_name} -> {new_name}")
+        # 更新数据库
+        if self.image_db:
+            try:
+                self.image_db.rename_group(old_name, normalized)
+            except Exception as e:
+                QMessageBox.warning(self, "重命名分组失败", f"无法重命名分组:\n{e}")
+                self.status_label.setText("重命名分组失败")
+                return
+
+        # 更新下拉框
+        index = self.group_combo.findText(old_name)
+        if index >= 0:
+            self.group_combo.setItemText(index, normalized)
+
+        self.refresh()
+        self.status_label.setText(f"已重命名分组: {old_name} -> {normalized}")
+
+    def _normalize_group_name(self, name: str) -> str:
+        """清理分组名称首尾空白。"""
+        return str(name).strip()
+
+    def _existing_group_names(self) -> List[str]:
+        """返回当前下拉框中的分组名称。"""
+        names = [
+            self.group_combo.itemText(i)
+            for i in range(self.group_combo.count())
+        ]
+        if self.image_db:
+            try:
+                names.extend(self.image_db.get_groups())
+            except Exception:
+                pass
+        return names
+
+    def _validate_group_name(self, name: str, current_name: Optional[str] = None):
+        """校验分组名称，返回 (标准化名称, 错误信息)。"""
+        normalized = self._normalize_group_name(name)
+        if not normalized:
+            return normalized, "分组名称不能为空"
+
+        if normalized in RESERVED_GROUP_NAMES:
+            return normalized, f"不能使用保留分组名: {normalized}"
+
+        current_key = self._normalize_group_name(current_name).casefold() if current_name else None
+        existing_keys = {
+            self._normalize_group_name(group).casefold()
+            for group in self._existing_group_names()
+        }
+        if current_key:
+            existing_keys.discard(current_key)
+
+        if normalized.casefold() in existing_keys:
+            return normalized, f"分组已存在: {normalized}"
+
+        return normalized, None
 
     def _on_rebuild_index(self):
         """重建所有图片的语义索引"""
@@ -701,5 +830,16 @@ class ImageLibraryPanel(QWidget):
 
             group, ok = QInputDialog.getItem(self, "选择分组", "请选择导入的分组:", groups, 0, True)
             if ok and group:
-                self.import_requested.emit(files, group)
+                normalized = self._normalize_group_name(group)
+                if not normalized:
+                    QMessageBox.warning(self, "导入失败", "分组名称不能为空")
+                    self.status_label.setText("分组名称不能为空")
+                    return
+                if normalized not in groups:
+                    normalized, error = self._validate_group_name(normalized)
+                    if error:
+                        QMessageBox.warning(self, "导入失败", error)
+                        self.status_label.setText(error)
+                        return
+                self.import_requested.emit(files, normalized)
 

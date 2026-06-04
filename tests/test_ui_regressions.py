@@ -17,10 +17,24 @@ except ImportError:  # pragma: no cover - optional GUI dependency may be absent 
 
 
 class FakeLibraryDb:
-    def __init__(self, images, fail_remove_ids=None):
+    def __init__(
+            self,
+            images,
+            fail_remove_ids=None,
+            groups=None,
+            fail_search=False,
+            fail_update_ids=None,
+            fail_group_ops=None):
         self.images = list(images)
         self.fail_remove_ids = set(fail_remove_ids or [])
+        self.fail_update_ids = set(fail_update_ids or [])
+        self.fail_group_ops = set(fail_group_ops or [])
+        self.fail_search = fail_search
+        self.groups = list(groups or ["默认"])
         self.removed = []
+        self.added_groups = []
+        self.renamed_groups = []
+        self.deleted_groups = []
 
     def get_image_count(self):
         return len(self.images)
@@ -32,6 +46,8 @@ class FakeLibraryDb:
         return self.images[:limit]
 
     def search_by_text(self, text_query, top_k=5):
+        if self.fail_search:
+            raise RuntimeError("index offline")
         query = text_query.lower()
         matches = [
             image for image in self.images
@@ -45,6 +61,36 @@ class FakeLibraryDb:
             raise RuntimeError("locked")
         self.removed.append(image_id)
         self.images = [image for image in self.images if image["id"] != image_id]
+
+    def update_image_metadata(self, image_id, new_metadata):
+        if image_id in self.fail_update_ids:
+            raise RuntimeError("metadata locked")
+        for image in self.images:
+            if image["id"] == image_id:
+                image.setdefault("metadata", {}).update(new_metadata)
+                return
+
+    def get_groups(self):
+        return list(self.groups)
+
+    def add_group(self, group_name):
+        if "add" in self.fail_group_ops:
+            raise RuntimeError("cannot add")
+        self.added_groups.append(group_name)
+        if group_name not in self.groups:
+            self.groups.append(group_name)
+
+    def delete_group(self, group_name):
+        if "delete" in self.fail_group_ops:
+            raise RuntimeError("cannot delete")
+        self.deleted_groups.append(group_name)
+        self.groups = [group for group in self.groups if group != group_name]
+
+    def rename_group(self, old_name, new_name):
+        if "rename" in self.fail_group_ops:
+            raise RuntimeError("cannot rename")
+        self.renamed_groups.append((old_name, new_name))
+        self.groups = [new_name if group == old_name else group for group in self.groups]
 
 
 @unittest.skipUnless(QApplication is not None, "PySide6 is not available")
@@ -402,6 +448,122 @@ class ColorPanelRegressionTests(unittest.TestCase):
             self.assertEqual(dialog.get_selected_paths(), [str(second_path)])
             self.assertFalse(first_thumb.is_selected())
             self.assertTrue(second_thumb.is_selected())
+
+    def test_image_library_group_names_are_validated_and_normalized(self):
+        from src.ui.image_library_panel import ImageLibraryPanel
+
+        image_db = FakeLibraryDb([], groups=["默认", "已有"])
+        panel = ImageLibraryPanel(image_db)
+        self.addCleanup(panel.close)
+        panel.refresh()
+
+        with mock.patch("src.ui.image_library_panel.QInputDialog.getText", return_value=("  已有  ", True)), \
+                mock.patch("src.ui.image_library_panel.QMessageBox.warning") as warning:
+            panel._on_new_group()
+
+        warning.assert_called_once()
+        self.assertEqual(image_db.added_groups, [])
+        self.assertEqual(panel.status_label.text(), "分组已存在: 已有")
+
+        with mock.patch("src.ui.image_library_panel.QInputDialog.getText", return_value=("  新分组  ", True)):
+            panel._on_new_group()
+
+        self.assertIn("新分组", image_db.added_groups)
+        self.assertEqual(panel.group_combo.currentText(), "新分组")
+
+    def test_image_library_rename_group_validates_duplicates_and_strips_name(self):
+        from src.ui.image_library_panel import ImageLibraryPanel
+
+        image_db = FakeLibraryDb([], groups=["默认", "旧名", "已有"])
+        panel = ImageLibraryPanel(image_db)
+        self.addCleanup(panel.close)
+        panel.refresh()
+
+        with mock.patch("src.ui.image_library_panel.QInputDialog.getText", return_value=("已有", True)), \
+                mock.patch("src.ui.image_library_panel.QMessageBox.warning") as warning:
+            panel._rename_group("旧名")
+
+        warning.assert_called_once()
+        self.assertEqual(image_db.renamed_groups, [])
+
+        with mock.patch("src.ui.image_library_panel.QInputDialog.getText", return_value=("  新名  ", True)):
+            panel._rename_group("旧名")
+
+        self.assertEqual(image_db.renamed_groups, [("旧名", "新名")])
+        self.assertIn("新名", [panel.group_combo.itemText(i) for i in range(panel.group_combo.count())])
+
+    def test_image_library_search_and_delete_failures_are_reported(self):
+        from src.ui.image_library_panel import ImageLibraryPanel
+
+        search_panel = ImageLibraryPanel(FakeLibraryDb([], fail_search=True))
+        self.addCleanup(search_panel.close)
+        search_panel.search_input.setText("风景")
+        search_panel._on_search()
+        self.assertEqual(search_panel.status_label.text(), "搜索失败: index offline")
+
+        delete_panel = ImageLibraryPanel(FakeLibraryDb([], fail_remove_ids={"bad"}))
+        self.addCleanup(delete_panel.close)
+        with mock.patch("src.ui.image_library_panel.QMessageBox.question", return_value=QMessageBox.Yes), \
+                mock.patch("src.ui.image_library_panel.QMessageBox.warning") as warning:
+            delete_panel._delete_image("bad")
+
+        warning.assert_called_once()
+        self.assertEqual(delete_panel.status_label.text(), "删除失败")
+
+    def test_image_library_import_allows_default_group_and_validates_new_group(self):
+        from src.ui.image_library_panel import ImageLibraryPanel
+
+        image_db = FakeLibraryDb([], groups=["默认"])
+        panel = ImageLibraryPanel(image_db)
+        self.addCleanup(panel.close)
+        emitted = []
+        panel.import_requested.connect(lambda files, group: emitted.append((files, group)))
+
+        with mock.patch("src.ui.image_library_panel.pick_images", return_value=["image.png"]), \
+                mock.patch("src.ui.image_library_panel.QInputDialog.getItem", return_value=("默认", True)):
+            panel._on_import_btn_clicked()
+
+        self.assertEqual(emitted, [(["image.png"], "默认")])
+
+        with mock.patch("src.ui.image_library_panel.pick_images", return_value=["image.png"]), \
+                mock.patch("src.ui.image_library_panel.QInputDialog.getItem", return_value=("全部", True)), \
+                mock.patch("src.ui.image_library_panel.QMessageBox.warning") as warning:
+            panel._on_import_btn_clicked()
+
+        warning.assert_called_once()
+        self.assertEqual(len(emitted), 1)
+
+    def test_image_library_thumbnail_rename_strips_empty_and_reports_failures(self):
+        from src.ui.image_library_panel import ImageLibraryPanel, ImageThumbnailWidget
+
+        image_db = FakeLibraryDb([
+            {"id": "ok", "path": "ok.png", "metadata": {"name": "old"}},
+            {"id": "locked", "path": "locked.png", "metadata": {"name": "old"}},
+        ], fail_update_ids={"locked"})
+        panel = ImageLibraryPanel(image_db)
+        self.addCleanup(panel.close)
+
+        panel._on_rename_requested_from_thumb("ok", "old", "  new  ")
+        self.assertEqual(image_db.images[0]["metadata"]["name"], "new")
+
+        with mock.patch("src.ui.image_library_panel.QMessageBox.warning") as warning:
+            panel._on_rename_requested_from_thumb("locked", "old", "new")
+
+        warning.assert_called_once()
+        self.assertEqual(panel.status_label.text(), "重命名失败")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            thumb_path = Path(tmp) / "thumb.png"
+            cv2.imwrite(str(thumb_path), np.full((8, 8, 3), 127, dtype=np.uint8))
+            thumbnail = ImageThumbnailWidget(str(thumb_path), name="old", img_id="ok")
+            self.addCleanup(thumbnail.close)
+            emitted = []
+            thumbnail.rename_requested.connect(lambda *args: emitted.append(args))
+            with mock.patch("src.ui.image_library_panel.QInputDialog.getText", return_value=("   ", True)):
+                thumbnail._start_rename()
+
+            self.assertEqual(emitted, [("ok", "old", "")])
+            self.assertEqual(thumbnail.img_name, "old")
 
 
 if __name__ == "__main__":
