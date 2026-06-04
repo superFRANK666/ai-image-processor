@@ -573,6 +573,18 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'agi_panel'):
             self.agi_panel.set_image_available(has_image)
 
+    def _set_text_analysis_busy(self, busy: bool):
+        """同步文本调色分析的进度条和提交按钮状态。"""
+        if busy:
+            self.progress_bar.show()
+            self.progress_bar.setRange(0, 0)
+        else:
+            self.progress_bar.hide()
+
+        if hasattr(self, 'color_panel'):
+            self.color_panel.apply_btn.setEnabled(not busy)
+            self.color_panel.apply_btn.setText("分析中..." if busy else "应用")
+
     def open_image(self):
         """打开图像文件"""
         # 使用统一的图像选择对话框
@@ -928,44 +940,30 @@ class MainWindow(QMainWindow):
 
         # 状态反馈
         self.statusbar.showMessage(f"正在分析调色指令: {text[:30]}...")
-        print(f"[调色指令] 处理: {text}")
-
-        # 显示进度指示器
-        self.progress_bar.show()
-        self.progress_bar.setRange(0, 0)  # 不确定进度
-
-        # 禁用应用按钮，防止重复提交
-        if hasattr(self, 'color_panel'):
-            self.color_panel.apply_btn.setEnabled(False)
-            self.color_panel.apply_btn.setText("分析中...")
+        logger.debug("[调色指令] 处理: %s", text)
+        self._set_text_analysis_busy(True)
 
         # 检查是否需要查找参考图像
-        reference_params = None
-        if "复刻" in text or "参考" in text:
-            # 尝试从文本中提取搜索关键词
-            if self.image_db:
-                results = self.image_db.search_by_text(text, top_k=1)
-                if results:
-                    ref_path = results[0]["path"]
-                    ref_image = imread_safe(ref_path)
-                    if ref_image is not None:
-                        reference_params = self.color_engine.extract_color_params(ref_image)
-                        print(f"[调色指令] 使用参考图片: {ref_path}")
+        try:
+            reference_params = self._resolve_text_reference_params(text)
+        except Exception as e:
+            logger.debug("Failed to resolve reference image for text command: %s", e, exc_info=True)
+            self._set_text_analysis_busy(False)
+            self.statusbar.showMessage(f"参考图片分析失败: {e}", 5000)
+            QMessageBox.warning(self, "参考图片不可用", f"无法使用参考图片:\n{e}")
+            return
 
         # 定义成功回调
         def on_parse_success(params):
             """解析成功回调"""
-            # 打印解析结果
-            print(f"[调色指令] 解析结果: 曝光={params.exposure:.2f}, 对比度={params.contrast:.2f}, "
-                  f"色温={params.temperature:.0f}, 饱和度={params.saturation:.2f}")
-
-            # 隐藏进度条
-            self.progress_bar.hide()
-
-            # 恢复按钮状态
-            if hasattr(self, 'color_panel'):
-                self.color_panel.apply_btn.setEnabled(True)
-                self.color_panel.apply_btn.setText("应用")
+            logger.debug(
+                "[调色指令] 解析结果: 曝光=%.2f, 对比度=%.2f, 色温=%.0f, 饱和度=%.2f",
+                params.exposure,
+                params.contrast,
+                params.temperature,
+                params.saturation,
+            )
+            self._set_text_analysis_busy(False)
 
             # 更新面板显示
             self.color_panel.set_params(params)
@@ -978,12 +976,7 @@ class MainWindow(QMainWindow):
         # 定义错误回调
         def on_parse_error(error_msg: str):
             """解析失败回调"""
-            self.progress_bar.hide()
-
-            # 恢复按钮状态
-            if hasattr(self, 'color_panel'):
-                self.color_panel.apply_btn.setEnabled(True)
-                self.color_panel.apply_btn.setText("应用")
+            self._set_text_analysis_busy(False)
 
             self.statusbar.showMessage(f"分析失败: {error_msg}", 5000)
             QMessageBox.warning(self, "分析失败", f"无法分析调色指令:\n{error_msg}")
@@ -995,6 +988,28 @@ class MainWindow(QMainWindow):
             on_error=on_parse_error,
             reference_params=reference_params
         )
+
+    def _resolve_text_reference_params(self, text: str):
+        """按文本意图查找参考图并提取色调参数。"""
+        if "复刻" not in text and "参考" not in text:
+            return None
+        if not self.image_db:
+            return None
+
+        results = self.image_db.search_by_text(text, top_k=1)
+        if not results:
+            return None
+
+        ref_path = results[0].get("path")
+        if not ref_path:
+            raise ValueError("参考图片缺少文件路径")
+
+        ref_image = imread_safe(ref_path)
+        if ref_image is None:
+            raise ValueError(f"无法读取参考图片: {ref_path}")
+
+        logger.debug("[调色指令] 使用参考图片: %s", ref_path)
+        return self.color_engine.extract_color_params(ref_image)
 
     def import_images(self, file_paths: list, group: str = "默认"):
         """导入图像到库"""

@@ -131,9 +131,48 @@ class FakeStatusBar:
 class FakeProgressBar:
     def __init__(self):
         self.hidden = False
+        self.shown = False
+        self.ranges = []
 
     def hide(self):
         self.hidden = True
+        self.shown = False
+
+    def show(self):
+        self.shown = True
+        self.hidden = False
+
+    def setRange(self, minimum, maximum):
+        self.ranges.append((minimum, maximum))
+
+
+class FakeButton:
+    def __init__(self):
+        self.enabled = True
+        self.text = "应用"
+
+    def setEnabled(self, enabled):
+        self.enabled = enabled
+
+    def setText(self, text):
+        self.text = text
+
+
+class FakeColorPanel:
+    def __init__(self):
+        self.apply_btn = FakeButton()
+        self.params = None
+
+    def set_params(self, params):
+        self.params = params
+
+
+class FakeParser:
+    def __init__(self):
+        self.calls = []
+
+    def parse_async(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
 
 
 @unittest.skipUnless(QApplication is not None, "PySide6 is not available")
@@ -772,6 +811,44 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertIsNone(fake_window._pending_params)
         self.assertFalse(fake_window._grading_history_pending)
         self.assertEqual(calls, ["display", "state"])
+
+    def test_text_reference_failure_restores_busy_state(self):
+        from src.ui.main_window import MainWindow
+
+        parser = FakeParser()
+        progress_bar = FakeProgressBar()
+        color_panel = FakeColorPanel()
+        fake_window = SimpleNamespace(
+            original_image=np.zeros((2, 2, 3), dtype=np.uint8),
+            progress_bar=progress_bar,
+            statusbar=FakeStatusBar(),
+            color_panel=color_panel,
+            nlp_parser=parser,
+            color_engine=object(),
+            image_db=FakeLibraryDb([], fail_search=True),
+            _ensure_model=lambda _name: True,
+        )
+        fake_window._set_text_analysis_busy = (
+            lambda busy: MainWindow._set_text_analysis_busy(fake_window, busy)
+        )
+        fake_window._resolve_text_reference_params = (
+            lambda text: MainWindow._resolve_text_reference_params(fake_window, text)
+        )
+
+        with mock.patch("src.ui.main_window.QMessageBox.warning") as warning:
+            MainWindow.process_text_command(fake_window, "参考这张图调成胶片感")
+
+        warning.assert_called_once()
+        self.assertEqual(parser.calls, [])
+        self.assertTrue(progress_bar.hidden)
+        self.assertFalse(progress_bar.shown)
+        self.assertEqual(progress_bar.ranges, [(0, 0)])
+        self.assertTrue(color_panel.apply_btn.enabled)
+        self.assertEqual(color_panel.apply_btn.text, "应用")
+        self.assertEqual(
+            fake_window.statusbar.messages[-1],
+            ("参考图片分析失败: index offline", 5000),
+        )
 
 
 if __name__ == "__main__":
