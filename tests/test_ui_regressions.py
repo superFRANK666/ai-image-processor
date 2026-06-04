@@ -128,6 +128,14 @@ class FakeStatusBar:
         self.messages.append((message, timeout))
 
 
+class FakeProgressBar:
+    def __init__(self):
+        self.hidden = False
+
+    def hide(self):
+        self.hidden = True
+
+
 @unittest.skipUnless(QApplication is not None, "PySide6 is not available")
 class ColorPanelRegressionTests(unittest.TestCase):
     @classmethod
@@ -699,6 +707,71 @@ class ColorPanelRegressionTests(unittest.TestCase):
 
         warning.assert_called_once()
         self.assertEqual(fake_window.statusbar.messages[-1], ("索引: 成功 1/2 张，失败 1 张", 5000))
+
+    def test_processing_error_rolls_back_pending_grading_history(self):
+        from src.ui.main_window import MainWindow
+
+        calls = []
+        fake_window = SimpleNamespace(
+            progress_bar=FakeProgressBar(),
+            statusbar=FakeStatusBar(),
+            _history_stack=["before"],
+            _grading_history_pending=True,
+            _pending_params=object(),
+            _update_action_states=lambda: calls.append("updated"),
+        )
+        fake_window._rollback_pending_grading = lambda: MainWindow._rollback_pending_grading(fake_window)
+
+        with mock.patch("src.ui.main_window.QMessageBox.warning") as warning:
+            MainWindow._on_processing_error(fake_window, "boom")
+
+        warning.assert_called_once()
+        self.assertTrue(fake_window.progress_bar.hidden)
+        self.assertEqual(fake_window._history_stack, [])
+        self.assertFalse(fake_window._grading_history_pending)
+        self.assertIsNone(fake_window._pending_params)
+        self.assertEqual(calls, ["updated"])
+        self.assertEqual(fake_window.statusbar.messages[-1], ("处理失败: boom", 5000))
+
+    def test_processing_error_preserves_history_without_pending_grading(self):
+        from src.ui.main_window import MainWindow
+
+        fake_window = SimpleNamespace(
+            _history_stack=["older"],
+            _grading_history_pending=False,
+            _pending_params=object(),
+        )
+
+        MainWindow._rollback_pending_grading(fake_window)
+
+        self.assertEqual(fake_window._history_stack, ["older"])
+        self.assertFalse(fake_window._grading_history_pending)
+        self.assertIsNone(fake_window._pending_params)
+
+    def test_grading_success_clears_pending_history_marker(self):
+        from src.ui.main_window import MainWindow
+
+        params = object()
+        calls = []
+        fake_window = SimpleNamespace(
+            progress_bar=FakeProgressBar(),
+            current_image=None,
+            _pending_params=params,
+            _current_params=None,
+            _grading_history_pending=True,
+            update_image_display=lambda: calls.append("display"),
+            _update_action_states=lambda: calls.append("state"),
+        )
+        result = np.full((2, 2, 3), 127, dtype=np.uint8)
+
+        MainWindow._on_grading_finished(fake_window, result)
+
+        self.assertTrue(fake_window.progress_bar.hidden)
+        self.assertIs(fake_window.current_image, result)
+        self.assertIs(fake_window._current_params, params)
+        self.assertIsNone(fake_window._pending_params)
+        self.assertFalse(fake_window._grading_history_pending)
+        self.assertEqual(calls, ["display", "state"])
 
 
 if __name__ == "__main__":

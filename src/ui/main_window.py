@@ -145,6 +145,7 @@ class MainWindow(QMainWindow):
         # 每个记录包含: {'image': np.ndarray, 'params': ColorGradingParams}
         self._history_stack = []
         self._current_params = None  # 当前调色参数
+        self._grading_history_pending = False
 
         # 使用 ModelManager 统一管理 AI 模型
         self.model_manager = ModelManager(self)
@@ -784,7 +785,9 @@ class MainWindow(QMainWindow):
             return
 
         # 保存当前状态到历史记录（在应用新调色前）
+        history_len_before = len(self._history_stack)
         self._save_history()
+        self._grading_history_pending = len(self._history_stack) > history_len_before
 
         # 保存待应用的参数，用于完成后更新
         self._pending_params = params
@@ -810,13 +813,26 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_pending_params'):
             self._current_params = self._pending_params
             self._pending_params = None
+        self._grading_history_pending = False
         self._update_action_states()
 
     def _on_processing_error(self, error_msg):
         """处理错误回调"""
         self.progress_bar.hide()
+        self._rollback_pending_grading()
+        self.statusbar.showMessage(f"处理失败: {error_msg}", 5000)
         self._update_action_states()
         QMessageBox.warning(self, "处理错误", error_msg)
+
+    def _rollback_pending_grading(self):
+        """调色线程失败时移除本次尚未成功应用的历史记录。"""
+        if getattr(self, '_grading_history_pending', False):
+            if self._history_stack:
+                self._history_stack.pop()
+            self._grading_history_pending = False
+
+        if hasattr(self, '_pending_params'):
+            self._pending_params = None
 
     def _coerce_batch_result(self, result) -> BatchOperationResult:
         """Accept old integer callbacks and new structured batch results."""
