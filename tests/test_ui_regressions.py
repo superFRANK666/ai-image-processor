@@ -838,6 +838,36 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertFalse(fake_window._grading_history_pending)
         self.assertEqual(calls, ["display", "state"])
 
+    def test_image_load_failure_updates_status_feedback(self):
+        from src.ui.main_window import MainWindow
+
+        fake_window = SimpleNamespace(statusbar=FakeStatusBar())
+
+        with mock.patch("src.ui.main_window.imread_safe", return_value=None), \
+                mock.patch("src.ui.main_window.QMessageBox.critical") as critical:
+            MainWindow.load_image(fake_window, "broken.png")
+
+        critical.assert_called_once()
+        self.assertEqual(
+            fake_window.statusbar.messages[-1],
+            ("加载图像失败: broken.png", 5000),
+        )
+
+    def test_library_image_load_failure_is_visible(self):
+        from src.ui.main_window import MainWindow
+
+        fake_window = SimpleNamespace(statusbar=FakeStatusBar())
+
+        with mock.patch("src.ui.main_window.imread_safe", return_value=None), \
+                mock.patch("src.ui.main_window.QMessageBox.warning") as warning:
+            MainWindow.load_reference_image(fake_window, "missing.png")
+
+        warning.assert_called_once()
+        self.assertEqual(
+            fake_window.statusbar.messages[-1],
+            ("无法加载图片: missing.png", 3000),
+        )
+
     def test_text_reference_failure_restores_busy_state(self):
         from src.ui.main_window import MainWindow
 

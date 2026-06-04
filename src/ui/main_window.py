@@ -632,9 +632,11 @@ class MainWindow(QMainWindow):
                 self.agi_camera.set_image(image)
 
             self._update_action_states()
+            self.statusbar.showMessage(f"已加载图片: {Path(file_path).name}", 3000)
 
         except (ValueError, OSError, IOError) as e:
             # 捕获文件读取和图像处理相关的错误
+            self.statusbar.showMessage(f"加载图像失败: {Path(file_path).name}", 5000)
             QMessageBox.critical(self, "错误", f"加载图像失败: {e}")
 
     def update_image_display(self):
@@ -1191,6 +1193,7 @@ class MainWindow(QMainWindow):
             self.statusbar.showMessage(f"已加载图片: {Path(image_path).name}", 3000)
         else:
             self.statusbar.showMessage(f"无法加载图片: {image_path}", 3000)
+            QMessageBox.warning(self, "加载失败", f"无法加载图片:\n{image_path}")
     
     def upload_and_apply_reference(self):
         """上传参考图片并提取色调应用到当前图片"""
