@@ -10,9 +10,38 @@ import cv2
 import numpy as np
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QMessageBox
 except ImportError:  # pragma: no cover - optional GUI dependency may be absent in slim envs
     QApplication = None
+    QMessageBox = None
+
+
+class FakeLibraryDb:
+    def __init__(self, images, fail_remove_ids=None):
+        self.images = list(images)
+        self.fail_remove_ids = set(fail_remove_ids or [])
+        self.removed = []
+
+    def get_image_count(self):
+        return len(self.images)
+
+    def get_all_images(self, limit=100, offset=0):
+        return self.images[offset:offset + limit]
+
+    def search_by_text(self, text_query, top_k=5):
+        query = text_query.lower()
+        matches = [
+            image for image in self.images
+            if query in image["path"].lower()
+            or query in image.get("metadata", {}).get("name", "").lower()
+        ]
+        return matches[:top_k]
+
+    def remove_image(self, image_id):
+        if image_id in self.fail_remove_ids:
+            raise RuntimeError("locked")
+        self.removed.append(image_id)
+        self.images = [image for image in self.images if image["id"] != image_id]
 
 
 @unittest.skipUnless(QApplication is not None, "PySide6 is not available")
@@ -20,6 +49,14 @@ class ColorPanelRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def _create_library_dialog(self, image_db):
+        from src.ui.library_manager_dialog import LibraryManagerDialog
+
+        with mock.patch("src.ui.library_manager_dialog.ThumbnailLoader.start"):
+            dialog = LibraryManagerDialog(image_db)
+        self.addCleanup(dialog.close)
+        return dialog
 
     def test_programmatic_reset_can_be_silent_but_button_reset_emits(self):
         from src.ui.color_grading_panel import ColorGradingPanel
@@ -183,6 +220,92 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertFalse(panel.generate_anim_btn.isEnabled())
         self.assertFalse(panel.point_mode_btn.isEnabled())
         self.assertFalse(panel.generate_object_3d_btn.isEnabled())
+
+    def test_library_manager_selection_state_clears_detail_panel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "valid.png"
+            cv2.imwrite(str(image_path), np.full((6, 8, 3), 127, dtype=np.uint8))
+            image_db = FakeLibraryDb([
+                {"id": "image-one", "path": str(image_path), "metadata": {"name": "valid"}}
+            ])
+
+            dialog = self._create_library_dialog(image_db)
+            self.assertEqual(dialog.list_widget.count(), 1)
+            self.assertFalse(dialog.btn_delete.isEnabled())
+            self.assertEqual(dialog.lbl_filename.text(), "-")
+
+            dialog.list_widget.setCurrentRow(0)
+            self.app.processEvents()
+
+            self.assertTrue(dialog.btn_delete.isEnabled())
+            self.assertEqual(dialog.lbl_filename.text(), image_path.name)
+            self.assertEqual(dialog.lbl_resolution.text(), "8 x 6")
+
+            dialog.list_widget.clearSelection()
+            self.app.processEvents()
+
+            self.assertFalse(dialog.btn_delete.isEnabled())
+            self.assertEqual(dialog.lbl_filename.text(), "-")
+            self.assertEqual(dialog.lbl_resolution.text(), "-")
+            self.assertEqual(dialog.img_preview.text(), "无预览")
+
+    def test_library_manager_context_delete_targets_right_clicked_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first_path = Path(tmp) / "first.png"
+            second_path = Path(tmp) / "second.png"
+            cv2.imwrite(str(first_path), np.full((8, 8, 3), 63, dtype=np.uint8))
+            cv2.imwrite(str(second_path), np.full((8, 8, 3), 127, dtype=np.uint8))
+            image_db = FakeLibraryDb([
+                {"id": "first", "path": str(first_path), "metadata": {"name": "first"}},
+                {"id": "second", "path": str(second_path), "metadata": {"name": "second"}},
+            ])
+
+            dialog = self._create_library_dialog(image_db)
+            dialog.show()
+            self.app.processEvents()
+            dialog.list_widget.setCurrentRow(0)
+
+            target = dialog.list_widget.item(1)
+            dialog._select_context_item(target)
+            with mock.patch("src.ui.library_manager_dialog.ThumbnailLoader.start"), \
+                    mock.patch("src.ui.library_manager_dialog.QMessageBox.question", return_value=QMessageBox.Yes), \
+                    mock.patch("src.ui.library_manager_dialog.QMessageBox.information"):
+                dialog._on_delete_clicked()
+
+            self.assertEqual(image_db.removed, ["second"])
+
+    def test_library_manager_delete_failure_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            good_path = Path(tmp) / "good.png"
+            bad_path = Path(tmp) / "bad.png"
+            cv2.imwrite(str(good_path), np.full((8, 8, 3), 63, dtype=np.uint8))
+            cv2.imwrite(str(bad_path), np.full((8, 8, 3), 127, dtype=np.uint8))
+            image_db = FakeLibraryDb([
+                {"id": "good", "path": str(good_path), "metadata": {"name": "good"}},
+                {"id": "bad", "path": str(bad_path), "metadata": {"name": "bad"}},
+            ], fail_remove_ids={"bad"})
+            dialog = self._create_library_dialog(image_db)
+            dialog.list_widget.selectAll()
+
+            with mock.patch("src.ui.library_manager_dialog.ThumbnailLoader.start"), \
+                    mock.patch("src.ui.library_manager_dialog.QMessageBox.question", return_value=QMessageBox.Yes), \
+                    mock.patch("src.ui.library_manager_dialog.QMessageBox.warning") as warning:
+                dialog._on_delete_clicked()
+
+            self.assertEqual(image_db.removed, ["good"])
+            warning.assert_called_once()
+
+    def test_library_manager_open_missing_folder_reports_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image_db = FakeLibraryDb([])
+            dialog = self._create_library_dialog(image_db)
+            missing_path = Path(tmp) / "missing" / "image.png"
+
+            with mock.patch("src.ui.library_manager_dialog.QMessageBox.warning") as warning:
+                self.assertFalse(dialog._open_file_in_explorer(str(missing_path)))
+
+            warning.assert_called_once()
+            self.assertIn("无法打开文件位置", dialog.status_bar.text())
 
 
 if __name__ == "__main__":

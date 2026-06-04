@@ -2,12 +2,12 @@
 图像库管理对话框
 用于管理、浏览、删除和导入图像库资源
 """
+import logging
 import os
+import platform
+import subprocess
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-import numpy as np
 import cv2
-import sys
 
 # 导入中文路径安全的图像IO函数 (使用相对导入)
 from ..utils.image_io import imread as imread_safe
@@ -15,21 +15,23 @@ from ..utils.image_io import imread as imread_safe
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QListWidget, QListWidgetItem, QLineEdit,
-    QMessageBox, QFileDialog, QSplitter, QGroupBox, QFormLayout,
-    QProgressBar, QMenu
+    QMessageBox, QSplitter, QGroupBox, QFormLayout, QMenu
 )
 from PySide6.QtCore import Qt, Signal, QSize, QThread
-from PySide6.QtGui import QIcon, QPixmap, QImage, QAction, QCursor
+from PySide6.QtGui import QIcon, QPixmap, QImage
 
 # 使用相对导入项目模块
 from ..ai import ImageIndexDatabase
-from ..core.config import SUPPORTED_FORMATS
 from .image_picker_dialog import pick_images
 from .ui_utils import fit_thumbnail_size
 
+
+logger = logging.getLogger(__name__)
+
+
 class ThumbnailLoader(QThread):
     """后台加载缩略图线程"""
-    thumbnail_loaded = Signal(str, QIcon)  # id, icon
+    thumbnail_loaded = Signal(str, QImage)  # id, image
 
     def __init__(self, images_data, icon_size=120):
         super().__init__()
@@ -59,11 +61,9 @@ class ThumbnailLoader(QThread):
                     h, w, ch = image.shape
                     bytes_per_line = ch * w
                     q_image = QImage(image.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
-                    pixmap = QPixmap.fromImage(q_image)
-                    
-                    self.thumbnail_loaded.emit(img_id, QIcon(pixmap))
-            except Exception:
-                pass
+                    self.thumbnail_loaded.emit(img_id, q_image)
+            except Exception as exc:
+                logger.debug("Failed to load thumbnail for %s: %s", path, exc)
                 
     def stop(self):
         self._is_running = False
@@ -101,6 +101,7 @@ class LibraryManagerDialog(QDialog):
         
         self.btn_delete = QPushButton("删除选中")
         self.btn_delete.setIcon(QIcon.fromTheme("edit-delete"))
+        self.btn_delete.setEnabled(False)
         self.btn_delete.clicked.connect(self._on_delete_clicked)
         toolbar.addWidget(self.btn_delete)
         
@@ -160,7 +161,7 @@ class LibraryManagerDialog(QDialog):
         
         # 右侧详情
         self.detail_panel = QGroupBox("图片详情")
-        self.detail_panel.setWidth(300)
+        self.detail_panel.setMinimumWidth(260)
         detail_layout = QVBoxLayout(self.detail_panel)
         
         self.img_preview = QLabel("无预览")
@@ -192,6 +193,38 @@ class LibraryManagerDialog(QDialog):
         # 3. 状态栏
         self.status_bar = QLabel("就绪")
         layout.addWidget(self.status_bar)
+
+        self._reset_detail_panel()
+        self._update_selection_actions()
+
+    def _reset_detail_panel(self):
+        """清空详情区，避免列表刷新或取消选择后保留旧图片信息。"""
+        self.lbl_filename.setText("-")
+        self.lbl_resolution.setText("-")
+        self.lbl_id.setText("-")
+        self.lbl_path.setText("-")
+        self.img_preview.clear()
+        self.img_preview.setText("无预览")
+
+    def _update_selection_actions(self):
+        """同步依赖选中项的工具栏动作。"""
+        self.btn_delete.setEnabled(bool(self.list_widget.selectedItems()))
+
+    def _stop_thumbnail_loader(self, timeout_ms=None):
+        """停止缩略图加载线程；关闭窗口时可设置超时。"""
+        if not self.loader_thread or not self.loader_thread.isRunning():
+            return True
+
+        logger.debug("Stopping library thumbnail loader")
+        self.loader_thread.stop()
+        if timeout_ms is None:
+            self.loader_thread.wait()
+            return True
+
+        stopped = self.loader_thread.wait(timeout_ms)
+        if not stopped:
+            logger.warning("Timed out while stopping library thumbnail loader")
+        return stopped
         
     def refresh_library(self):
         """刷新列表"""
@@ -200,30 +233,37 @@ class LibraryManagerDialog(QDialog):
     def _load_page(self, page_index: int):
         """加载指定页"""
         if not self.image_db:
+            self.images_data = []
+            self.list_widget.clear()
+            self._reset_detail_panel()
+            self._update_selection_actions()
+            self.btn_prev.setEnabled(False)
+            self.btn_next.setEnabled(False)
+            self.lbl_page.setText("无图像库")
+            self.status_bar.setText("图像库未初始化")
             return
             
         self.list_widget.clear()
-        self.lbl_filename.setText("-")
-        self.img_preview.setText("无预览")
+        self._reset_detail_panel()
+        self._update_selection_actions()
         
         # 停止之前的加载线程
-        if self.loader_thread and self.loader_thread.isRunning():
-            self.loader_thread.stop()
-            self.loader_thread.wait()
+        self._stop_thumbnail_loader()
             
         offset = page_index * self.page_size
         
         # 判断是全部列表还是搜索结果（这里简化逻辑，暂只支持全部）
         # 如果需要支持搜索分页，需要修改ImageIndexDatabase的搜索接口支持分页
         # 目前搜索结果通常较少，可以一次性显示
-        if self.search_input.text().strip():
+        query = self.search_input.text().strip()
+        if query:
             # 搜索模式 (复用search_by_text，不支持分页)
-            results = self.image_db.search_by_text(self.search_input.text().strip(), top_k=100)
+            results = self.image_db.search_by_text(query, top_k=100)
             self.images_data = results
             self.current_page = 0
             self.btn_prev.setEnabled(False)
             self.btn_next.setEnabled(False)
-            self.lbl_page.setText("搜索结果")
+            self.lbl_page.setText(f"搜索结果: {len(results)} 张")
         else:
             # 浏览模式
             # 注意：get_all_images是从db获取
@@ -245,20 +285,23 @@ class LibraryManagerDialog(QDialog):
             item.setToolTip(path)
             self.list_widget.addItem(item)
             
-        # 启动后台加载缩略图
-        self.loader_thread = ThumbnailLoader(self.images_data)
-        self.loader_thread.thumbnail_loaded.connect(self._update_item_icon)
-        self.loader_thread.start()
+        if self.images_data:
+            # 启动后台加载缩略图
+            self.loader_thread = ThumbnailLoader(self.images_data)
+            self.loader_thread.thumbnail_loaded.connect(self._update_item_icon)
+            self.loader_thread.start()
+        else:
+            self.loader_thread = None
         
         self.status_bar.setText(f"已加载 {len(self.images_data)} 张图片")
         
-    def _update_item_icon(self, img_id, icon):
+    def _update_item_icon(self, img_id, q_image):
         """更新列表项图标"""
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
-            data = item.data(Qt.UserRole)
-            if data['id'] == img_id:
-                item.setIcon(icon)
+            data = item.data(Qt.UserRole) or {}
+            if data.get('id') == img_id:
+                item.setIcon(QIcon(QPixmap.fromImage(q_image)))
                 break
                 
     def _prev_page(self):
@@ -276,17 +319,19 @@ class LibraryManagerDialog(QDialog):
         
     def _on_selection_changed(self):
         """选中项改变"""
+        self._update_selection_actions()
         items = self.list_widget.selectedItems()
         if not items:
+            self._reset_detail_panel()
             return
             
         # 显示第一个选中项的详情
         item = items[0]
-        data = item.data(Qt.UserRole)
-        path = data['path']
+        data = item.data(Qt.UserRole) or {}
+        path = data.get('path', '')
         
         self.lbl_filename.setText(Path(path).name)
-        self.lbl_id.setText(str(data['id'])[:8] + "...")
+        self.lbl_id.setText(str(data.get('id', ''))[:8] + "...")
         self.lbl_path.setText(path)
         
         # 加载预览图
@@ -299,15 +344,20 @@ class LibraryManagerDialog(QDialog):
                 # 显示预览
                 rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb.shape
-                qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+                qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
                 pixmap = QPixmap.fromImage(qimg)
                 
                 # 适应Label大小
                 scaled = pixmap.scaled(self.img_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self.img_preview.setPixmap(scaled)
             else:
+                self.lbl_resolution.setText("-")
+                self.img_preview.clear()
                 self.img_preview.setText("加载失败")
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed to preview library image %s: %s", path, exc)
+            self.lbl_resolution.setText("-")
+            self.img_preview.clear()
             self.img_preview.setText("预览出错")
 
     def _on_import_clicked(self):
@@ -325,59 +375,100 @@ class LibraryManagerDialog(QDialog):
         """删除选中"""
         items = self.list_widget.selectedItems()
         if not items:
+            self.status_bar.setText("请先选择要删除的图片")
+            self._update_selection_actions()
             return
             
         if QMessageBox.question(self, "确认删除", f"确定要从库中删除选中的 {len(items)} 张图片吗？") != QMessageBox.Yes:
             return
             
-        ids_to_remove = []
+        removed = 0
+        failures = []
         for item in items:
-            data = item.data(Qt.UserRole)
-            img_id = data['id']
-            # 从数据库删除
-            self.image_db.remove_image(img_id)
-            ids_to_remove.append(img_id)
-            
-        # 刷新页面
-        self.refresh_library()
-        QMessageBox.information(self, "完成", "删除成功")
+            data = item.data(Qt.UserRole) or {}
+            img_id = data.get('id')
+            if not img_id:
+                failures.append(item.text())
+                continue
+
+            try:
+                # 从数据库删除，不删除磁盘原文件
+                self.image_db.remove_image(img_id)
+                removed += 1
+            except Exception as exc:
+                label = Path(data.get('path', item.text())).name
+                failures.append(f"{label}: {exc}")
+                logger.debug("Failed to remove image %s from library: %s", img_id, exc)
+
+        if removed:
+            self.refresh_library()
+            self.status_bar.setText(f"已从库中删除 {removed} 张图片")
+        else:
+            self._update_selection_actions()
+
+        if failures:
+            preview = "\n".join(failures[:3])
+            if len(failures) > 3:
+                preview += f"\n...另有 {len(failures) - 3} 张失败"
+            QMessageBox.warning(self, "删除未完成", f"以下图片未能从库中删除:\n{preview}")
+        elif removed:
+            QMessageBox.information(self, "完成", f"已从库中删除 {removed} 张图片")
 
     def _show_context_menu(self, pos):
         """右键菜单"""
         item = self.list_widget.itemAt(pos)
         if not item:
             return
+
+        self._select_context_item(item)
             
-        menu = QMenu()
+        menu = QMenu(self)
         act_open = menu.addAction("打开文件位置")
         act_delete = menu.addAction("从库中删除")
         
         action = menu.exec_(self.list_widget.mapToGlobal(pos))
         
         if action == act_open:
-            data = item.data(Qt.UserRole)
-            self._open_file_in_explorer(data['path'])
+            data = item.data(Qt.UserRole) or {}
+            self._open_file_in_explorer(data.get('path', ''))
         elif action == act_delete:
             self._on_delete_clicked()
+
+    def _select_context_item(self, item):
+        """右键操作前选中目标项，避免删除仍作用于旧选择。"""
+        if not item.isSelected():
+            self.list_widget.clearSelection()
+            item.setSelected(True)
+            self.list_widget.setCurrentItem(item)
             
     def _open_file_in_explorer(self, path):
-        import platform, subprocess
-        path = str(Path(path).parent)
-        if platform.system() == "Windows":
-            os.startfile(path)
-        elif platform.system() == "Darwin":
-            subprocess.Popen(["open", path])
-        else:
-            subprocess.Popen(["xdg-open", path])
+        directory = Path(path).expanduser().parent
+        if not path or not directory.exists():
+            self.status_bar.setText("无法打开文件位置：目录不存在")
+            QMessageBox.warning(self, "无法打开文件位置", f"目录不存在:\n{directory}")
+            return False
+
+        try:
+            if platform.system() == "Windows":
+                os.startfile(str(directory))
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", str(directory)])
+            else:
+                subprocess.Popen(["xdg-open", str(directory)])
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.exception("Failed to open image directory %s", directory)
+            self.status_bar.setText("无法打开文件位置")
+            QMessageBox.warning(self, "无法打开文件位置", f"无法打开目录:\n{directory}\n\n{exc}")
+            return False
+
+        self.status_bar.setText(f"已打开文件位置: {directory}")
+        return True
     
     def closeEvent(self, event):
         """关闭事件 - 确保线程正确停止"""
-        if self.loader_thread and self.loader_thread.isRunning():
-            print("[LibraryManagerDialog] 停止缩略图加载线程...")
-            self.loader_thread.stop()
-            if not self.loader_thread.wait(3000):
-                print("[LibraryManagerDialog] 警告: 线程等待超时，暂不关闭")
-                event.ignore()
-                return
+        if not self._stop_thumbnail_loader(3000):
+            self.status_bar.setText("缩略图仍在加载中，暂不能关闭")
+            event.ignore()
+            return
         event.accept()
 
