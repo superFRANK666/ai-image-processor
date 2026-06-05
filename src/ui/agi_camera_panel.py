@@ -300,6 +300,8 @@ class ClickableImageLabel(QWidget):
 class AnimationPreview(QLabel):
     """动画预览组件"""
 
+    PLAYBACK_BASE_FPS = 30
+
     def __init__(self):
         super().__init__()
         self.setAlignment(Qt.AlignCenter)
@@ -309,6 +311,8 @@ class AnimationPreview(QLabel):
 
         self._frames: List[np.ndarray] = []
         self._current_frame = 0
+        self._playback_position = 0.0
+        self._frame_step = 1.0
         self._playing = False
 
         self._timer = QTimer()
@@ -320,6 +324,7 @@ class AnimationPreview(QLabel):
         """设置动画帧"""
         self._frames = frames
         self._current_frame = 0
+        self._playback_position = 0.0
         if frames:
             self._show_frame(0)
         else:
@@ -357,14 +362,22 @@ class AnimationPreview(QLabel):
         if not self._frames:
             return
 
-        self._current_frame = (self._current_frame + 1) % len(self._frames)
+        self._playback_position = (self._playback_position + self._frame_step) % len(self._frames)
+        self._current_frame = int(self._playback_position) % len(self._frames)
         self._show_frame(self._current_frame)
+
+    def _set_preview_refresh_rate(self, fps: int):
+        """设置预览刷新率，同时保持固定旋转速度。"""
+        safe_fps = max(1, int(fps))
+        interval = max(1, int(1000 / safe_fps))
+        self._frame_step = self.PLAYBACK_BASE_FPS / safe_fps
+        return interval
 
     def play(self, fps: int = 30):
         """播放动画"""
         if self._frames:
             self._playing = True
-            interval = int(1000 / fps)  # 根据fps计算间隔
+            interval = self._set_preview_refresh_rate(fps)
             self._timer.start(interval)
 
     def pause(self):
@@ -377,6 +390,7 @@ class AnimationPreview(QLabel):
         self._playing = False
         self._timer.stop()
         self._current_frame = 0
+        self._playback_position = 0.0
         if self._frames:
             self._show_frame(0)
 
@@ -386,7 +400,7 @@ class AnimationPreview(QLabel):
 
     def set_frame_rate(self, fps: int):
         """设置帧率"""
-        interval = int(1000 / fps)
+        interval = self._set_preview_refresh_rate(fps)
         if self._playing:
             self._timer.setInterval(interval)
 

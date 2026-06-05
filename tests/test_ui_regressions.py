@@ -298,6 +298,27 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertIsNotNone(pixmap)
         self.assertFalse(pixmap.isNull())
 
+    def test_agi_preview_fps_does_not_change_rotation_speed(self):
+        from src.ui.agi_camera_panel import AnimationPreview
+
+        def frame_after_one_second(fps):
+            preview = SimpleNamespace(
+                PLAYBACK_BASE_FPS=AnimationPreview.PLAYBACK_BASE_FPS,
+                _frames=[object() for _ in range(60)],
+                _current_frame=0,
+                _playback_position=0.0,
+                _frame_step=1.0,
+                _show_frame=lambda _index: None,
+            )
+            AnimationPreview._set_preview_refresh_rate(preview, fps)
+            for _ in range(fps):
+                AnimationPreview._next_frame(preview)
+            return preview._current_frame
+
+        self.assertEqual(frame_after_one_second(10), 30)
+        self.assertEqual(frame_after_one_second(30), 30)
+        self.assertEqual(frame_after_one_second(60), 30)
+
     def test_agi_export_buttons_follow_generated_state(self):
         from src.ai import Mesh3D
         from src.ui.agi_camera_panel import AGICameraPanel
