@@ -93,6 +93,9 @@ class ColorGradingPanel(QWidget):
     text_input_submitted = Signal(str)
     find_similar_requested = Signal()
     upload_reference_requested = Signal()  # 请求上传参考图片
+    look_apply_requested = Signal(str)
+    save_look_requested = Signal()
+    delete_look_requested = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -106,6 +109,7 @@ class ColorGradingPanel(QWidget):
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.setInterval(150)  # 150ms 防抖延迟
         self._debounce_timer.timeout.connect(self._emit_params_changed)
+        self._image_available = False
 
         self._setup_ui()
         self._connect_signals()
@@ -126,6 +130,7 @@ class ColorGradingPanel(QWidget):
         input_layout.addWidget(self.text_input)
 
         self.apply_btn = QPushButton("应用")
+        self.apply_btn.setProperty("variant", "primary")
         self.apply_btn.setMinimumWidth(60)
         input_layout.addWidget(self.apply_btn)
         nlp_layout.addLayout(input_layout)
@@ -148,11 +153,13 @@ class ColorGradingPanel(QWidget):
         
         # 查找相似按钮
         self.find_similar_btn = QPushButton("查找相似风格")
+        self.find_similar_btn.setProperty("variant", "secondary")
         self.find_similar_btn.setToolTip("在图像库中查找与当前图片风格相似的图片")
         style_ref_layout.addWidget(self.find_similar_btn)
         
         # 上传参考图片按钮
         self.upload_reference_btn = QPushButton("上传参考图片")
+        self.upload_reference_btn.setProperty("variant", "secondary")
         self.upload_reference_btn.setToolTip("上传一张参考图片，提取其色调并应用到当前图片")
         style_ref_layout.addWidget(self.upload_reference_btn)
         
@@ -160,11 +167,47 @@ class ColorGradingPanel(QWidget):
         
         # 参考图片状态标签
         self.reference_status_label = QLabel("")
-        self.reference_status_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.reference_status_label.setObjectName("inlineStatus")
+        self.reference_status_label.setProperty("state", "muted")
         self.reference_status_label.setWordWrap(True)
         nlp_layout.addWidget(self.reference_status_label)
 
         layout.addWidget(nlp_group)
+
+        # 可复用风格配方
+        look_group = QGroupBox("风格配方")
+        look_layout = QVBoxLayout(look_group)
+
+        self.look_combo = QComboBox()
+        self.look_combo.addItem("选择风格配方...", None)
+        self.look_combo.setToolTip("保存和复用常用调色参数")
+        self.look_combo.installEventFilter(self._wheel_blocker)
+        look_layout.addWidget(self.look_combo)
+
+        look_btn_layout = QHBoxLayout()
+        self.look_apply_btn = QPushButton("套用")
+        self.look_apply_btn.setProperty("variant", "primary")
+        self.look_apply_btn.setToolTip("将所选风格配方应用到当前图像")
+        look_btn_layout.addWidget(self.look_apply_btn)
+
+        self.save_look_btn = QPushButton("保存当前")
+        self.save_look_btn.setProperty("variant", "secondary")
+        self.save_look_btn.setToolTip("把当前调色参数保存为可复用风格配方")
+        look_btn_layout.addWidget(self.save_look_btn)
+
+        self.delete_look_btn = QPushButton("删除")
+        self.delete_look_btn.setProperty("variant", "danger")
+        self.delete_look_btn.setToolTip("删除所选自定义风格配方")
+        look_btn_layout.addWidget(self.delete_look_btn)
+        look_layout.addLayout(look_btn_layout)
+
+        self.look_status_label = QLabel("内置配方可直接套用，自定义配方会保存到本地。")
+        self.look_status_label.setObjectName("inlineStatus")
+        self.look_status_label.setProperty("state", "muted")
+        self.look_status_label.setWordWrap(True)
+        look_layout.addWidget(self.look_status_label)
+
+        layout.addWidget(look_group)
 
         # 参数调整区域 (可滚动)
         scroll_area = QScrollArea()
@@ -249,9 +292,11 @@ class ColorGradingPanel(QWidget):
         btn_layout = QHBoxLayout()
 
         self.reset_btn = QPushButton("重置参数")
+        self.reset_btn.setProperty("variant", "secondary")
         btn_layout.addWidget(self.reset_btn)
 
         self.copy_params_btn = QPushButton("复制参数")
+        self.copy_params_btn.setProperty("variant", "secondary")
         btn_layout.addWidget(self.copy_params_btn)
 
         layout.addLayout(btn_layout)
@@ -320,6 +365,13 @@ class ColorGradingPanel(QWidget):
 
         # 复制参数
         self.copy_params_btn.clicked.connect(self._copy_params)
+
+        # 风格配方
+        self.look_combo.currentIndexChanged.connect(self._update_look_actions)
+        self.look_apply_btn.clicked.connect(self._on_apply_look)
+        self.save_look_btn.clicked.connect(self.save_look_requested.emit)
+        self.delete_look_btn.clicked.connect(self._on_delete_look)
+        self._update_look_actions()
 
     def _on_text_submitted(self):
         """文本提交"""
@@ -412,11 +464,75 @@ class ColorGradingPanel(QWidget):
     
     def set_reference_status(self, message: str, success: bool = True):
         """设置参考图片状态信息"""
-        color = "#4CAF50" if success else "#888"
-        self.reference_status_label.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self._set_status_label_state(self.reference_status_label, "success" if success else "muted")
         self.reference_status_label.setText(message)
 
     def set_image_available(self, available: bool):
         """根据是否有当前图像启用或禁用调色交互。"""
+        self._image_available = available
         for widget in self._image_dependent_widgets:
             widget.setEnabled(available)
+        self._update_look_actions()
+
+    def set_look_presets(self, presets, selected_id: Optional[str] = None):
+        """刷新可选风格配方。"""
+        current_id = selected_id or self.get_selected_look_id()
+        self.look_combo.blockSignals(True)
+        self.look_combo.clear()
+        self.look_combo.addItem("选择风格配方...", None)
+        for preset in presets:
+            if hasattr(preset, "to_dict"):
+                preset = preset.to_dict()
+            source = preset.get("source", "custom")
+            suffix = "内置" if source == "builtin" else "自定义"
+            self.look_combo.addItem(
+                f"{preset.get('name', '未命名')} · {suffix}",
+                {
+                    "id": preset.get("id"),
+                    "source": source,
+                    "description": preset.get("description", ""),
+                },
+            )
+        if current_id:
+            for index in range(self.look_combo.count()):
+                data = self.look_combo.itemData(index)
+                if isinstance(data, dict) and data.get("id") == current_id:
+                    self.look_combo.setCurrentIndex(index)
+                    break
+        self.look_combo.blockSignals(False)
+        self._update_look_actions()
+
+    def get_selected_look_id(self):
+        """获取当前选中的风格配方 id。"""
+        data = self.look_combo.currentData()
+        if isinstance(data, dict):
+            return data.get("id")
+        return None
+
+    def set_look_status(self, message: str, success: bool = True):
+        """设置风格配方状态信息。"""
+        self._set_status_label_state(self.look_status_label, "success" if success else "error")
+        self.look_status_label.setText(message)
+
+    def _on_apply_look(self):
+        preset_id = self.get_selected_look_id()
+        if preset_id:
+            self.look_apply_requested.emit(preset_id)
+
+    def _on_delete_look(self):
+        preset_id = self.get_selected_look_id()
+        if preset_id:
+            self.delete_look_requested.emit(preset_id)
+
+    def _update_look_actions(self):
+        data = self.look_combo.currentData() if hasattr(self, "look_combo") else None
+        has_preset = isinstance(data, dict) and bool(data.get("id"))
+        is_custom = has_preset and data.get("source") == "custom"
+        self.look_apply_btn.setEnabled(self._image_available and has_preset)
+        self.save_look_btn.setEnabled(self._image_available)
+        self.delete_look_btn.setEnabled(is_custom)
+
+    def _set_status_label_state(self, label: QLabel, state: str):
+        label.setProperty("state", state)
+        label.style().unpolish(label)
+        label.style().polish(label)

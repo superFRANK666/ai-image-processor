@@ -49,7 +49,7 @@ COLOR_PRESETS = {
 
 
 # 应用程序版本
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 # UI配置
 UI_CONFIG = {

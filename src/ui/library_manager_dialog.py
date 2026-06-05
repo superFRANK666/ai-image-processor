@@ -15,7 +15,7 @@ from ..utils.image_io import imread as imread_safe
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QListWidget, QListWidgetItem, QLineEdit,
-    QMessageBox, QSplitter, QGroupBox, QFormLayout, QMenu
+    QMessageBox, QSplitter, QGroupBox, QFormLayout, QMenu, QFrame
 )
 from PySide6.QtCore import Qt, Signal, QSize, QThread
 from PySide6.QtGui import QIcon, QPixmap, QImage
@@ -76,6 +76,7 @@ class LibraryManagerDialog(QDialog):
     
     def __init__(self, image_db: ImageIndexDatabase, parent=None):
         super().__init__(parent)
+        self.setObjectName("libraryManagerDialog")
         self.image_db = image_db
         self.setWindowTitle("图像库管理")
         self.resize(1000, 700)
@@ -90,22 +91,51 @@ class LibraryManagerDialog(QDialog):
     def _setup_ui(self):
         """设置UI布局"""
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        header = QFrame()
+        header.setObjectName("libraryManagerHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(14, 12, 14, 12)
+        header_layout.setSpacing(14)
+
+        title_copy = QVBoxLayout()
+        title_copy.setContentsMargins(0, 0, 0, 0)
+        title_copy.setSpacing(2)
+        self.manager_title = QLabel("图像库管理")
+        self.manager_title.setObjectName("libraryManagerTitle")
+        self.manager_subtitle = QLabel("审阅素材、定位文件、批量清理与维护语义索引资产。")
+        self.manager_subtitle.setObjectName("libraryManagerSubtitle")
+        title_copy.addWidget(self.manager_title)
+        title_copy.addWidget(self.manager_subtitle)
+        header_layout.addLayout(title_copy, 1)
+
+        self.total_value_label = self._create_header_metric(header_layout, "总素材", "--")
+        self.loaded_value_label = self._create_header_metric(header_layout, "本页", "0 张")
+        self.selected_value_label = self._create_header_metric(header_layout, "已选", "0 张")
+        layout.addWidget(header)
         
         # 1. 顶部工具栏
         toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(8)
         
         self.btn_import = QPushButton("导入图片")
+        self.btn_import.setProperty("variant", "primary")
         self.btn_import.setIcon(QIcon.fromTheme("document-new"))
         self.btn_import.clicked.connect(self._on_import_clicked)
         toolbar.addWidget(self.btn_import)
         
         self.btn_delete = QPushButton("删除选中")
+        self.btn_delete.setProperty("variant", "danger")
         self.btn_delete.setIcon(QIcon.fromTheme("edit-delete"))
         self.btn_delete.setEnabled(False)
         self.btn_delete.clicked.connect(self._on_delete_clicked)
         toolbar.addWidget(self.btn_delete)
         
         self.btn_refresh = QPushButton("刷新")
+        self.btn_refresh.setProperty("variant", "secondary")
         self.btn_refresh.setIcon(QIcon.fromTheme("view-refresh"))
         self.btn_refresh.clicked.connect(self.refresh_library)
         toolbar.addWidget(self.btn_refresh)
@@ -119,6 +149,7 @@ class LibraryManagerDialog(QDialog):
         toolbar.addWidget(self.search_input)
         
         self.btn_search = QPushButton("搜索")
+        self.btn_search.setProperty("variant", "secondary")
         self.btn_search.clicked.connect(self._on_search)
         toolbar.addWidget(self.btn_search)
         
@@ -129,10 +160,13 @@ class LibraryManagerDialog(QDialog):
         
         # 左侧列表
         list_container = QWidget()
+        list_container.setObjectName("libraryManagerListPane")
         list_layout = QVBoxLayout(list_container)
-        list_layout.setContentsMargins(0,0,0,0)
+        list_layout.setContentsMargins(0, 0, 0, 0)
+        list_layout.setSpacing(8)
         
         self.list_widget = QListWidget()
+        self.list_widget.setObjectName("libraryManagerList")
         self.list_widget.setIconSize(QSize(120, 120))
         self.list_widget.setViewMode(QListWidget.IconMode)
         self.list_widget.setResizeMode(QListWidget.Adjust)
@@ -146,10 +180,13 @@ class LibraryManagerDialog(QDialog):
         # 分页控件
         pagination_layout = QHBoxLayout()
         self.btn_prev = QPushButton("上一页")
+        self.btn_prev.setProperty("variant", "secondary")
         self.btn_prev.clicked.connect(self._prev_page)
         self.btn_next = QPushButton("下一页")
+        self.btn_next.setProperty("variant", "secondary")
         self.btn_next.clicked.connect(self._next_page)
         self.lbl_page = QLabel("第 1 页")
+        self.lbl_page.setObjectName("mutedText")
         
         pagination_layout.addWidget(self.btn_prev)
         pagination_layout.addWidget(self.lbl_page)
@@ -161,13 +198,14 @@ class LibraryManagerDialog(QDialog):
         
         # 右侧详情
         self.detail_panel = QGroupBox("图片详情")
+        self.detail_panel.setObjectName("libraryManagerDetailPanel")
         self.detail_panel.setMinimumWidth(260)
         detail_layout = QVBoxLayout(self.detail_panel)
         
         self.img_preview = QLabel("无预览")
+        self.img_preview.setObjectName("libraryManagerPreview")
         self.img_preview.setAlignment(Qt.AlignCenter)
         self.img_preview.setMinimumHeight(200)
-        self.img_preview.setStyleSheet("background: #2d2d2d; border: 1px solid #444;")
         detail_layout.addWidget(self.img_preview)
         
         form_layout = QFormLayout()
@@ -192,10 +230,47 @@ class LibraryManagerDialog(QDialog):
         
         # 3. 状态栏
         self.status_bar = QLabel("就绪")
+        self.status_bar.setObjectName("mutedText")
         layout.addWidget(self.status_bar)
 
         self._reset_detail_panel()
         self._update_selection_actions()
+
+    def _create_header_metric(self, parent_layout: QHBoxLayout, name: str, value: str) -> QLabel:
+        metric = QFrame()
+        metric.setObjectName("libraryManagerMetric")
+        metric_layout = QVBoxLayout(metric)
+        metric_layout.setContentsMargins(0, 0, 0, 0)
+        metric_layout.setSpacing(2)
+
+        name_label = QLabel(name)
+        name_label.setObjectName("libraryManagerMetricName")
+        value_label = QLabel(value)
+        value_label.setObjectName("libraryManagerMetricValue")
+
+        metric_layout.addWidget(name_label)
+        metric_layout.addWidget(value_label)
+        parent_layout.addWidget(metric)
+        return value_label
+
+    def _sync_header_metrics(self, total_count=None, loaded_count=None):
+        """同步管理弹窗顶部摘要。"""
+        if not hasattr(self, "total_value_label"):
+            return
+
+        if total_count is None and self.image_db is not None:
+            try:
+                total_count = self.image_db.get_image_count()
+            except Exception:
+                total_count = None
+
+        if loaded_count is None:
+            loaded_count = len(getattr(self, "images_data", []) or [])
+
+        selected_count = len(self.list_widget.selectedItems()) if hasattr(self, "list_widget") else 0
+        self.total_value_label.setText(f"{total_count} 张" if total_count is not None else "--")
+        self.loaded_value_label.setText(f"{loaded_count} 张")
+        self.selected_value_label.setText(f"{selected_count} 张")
 
     def _reset_detail_panel(self):
         """清空详情区，避免列表刷新或取消选择后保留旧图片信息。"""
@@ -241,6 +316,7 @@ class LibraryManagerDialog(QDialog):
             self.btn_next.setEnabled(False)
             self.lbl_page.setText("无图像库")
             self.status_bar.setText("图像库未初始化")
+            self._sync_header_metrics(None, 0)
             return
             
         self.list_widget.clear()
@@ -256,24 +332,34 @@ class LibraryManagerDialog(QDialog):
         # 如果需要支持搜索分页，需要修改ImageIndexDatabase的搜索接口支持分页
         # 目前搜索结果通常较少，可以一次性显示
         query = self.search_input.text().strip()
-        if query:
-            # 搜索模式 (复用search_by_text，不支持分页)
-            results = self.image_db.search_by_text(query, top_k=100)
-            self.images_data = results
-            self.current_page = 0
+        total_count = None
+        try:
+            if query:
+                # 搜索模式 (复用search_by_text，不支持分页)
+                results = self.image_db.search_by_text(query, top_k=100)
+                total_count = self.image_db.get_image_count()
+                self.images_data = results
+                self.current_page = 0
+                self.btn_prev.setEnabled(False)
+                self.btn_next.setEnabled(False)
+                self.lbl_page.setText(f"搜索结果: {len(results)} 张")
+            else:
+                # 浏览模式
+                total_count = self.image_db.get_image_count()
+                self.images_data = self.image_db.get_all_images(limit=self.page_size, offset=offset)
+
+                # 更新分页按钮状态
+                self.btn_prev.setEnabled(page_index > 0)
+                self.btn_next.setEnabled((offset + self.page_size) < total_count)
+                self.lbl_page.setText(f"第 {page_index + 1} 页 (共 {total_count} 张)")
+        except Exception as exc:
+            self.images_data = []
             self.btn_prev.setEnabled(False)
             self.btn_next.setEnabled(False)
-            self.lbl_page.setText(f"搜索结果: {len(results)} 张")
-        else:
-            # 浏览模式
-            # 注意：get_all_images是从db获取
-            total_count = self.image_db.get_image_count()
-            self.images_data = self.image_db.get_all_images(limit=self.page_size, offset=offset)
-            
-            # 更新分页按钮状态
-            self.btn_prev.setEnabled(page_index > 0)
-            self.btn_next.setEnabled((offset + self.page_size) < total_count)
-            self.lbl_page.setText(f"第 {page_index + 1} 页 (共 {total_count} 张)")
+            self.lbl_page.setText("加载失败")
+            self.status_bar.setText(f"加载失败: {exc}")
+            self._sync_header_metrics(None, 0)
+            return
             
         # 填充列表项
         for img in self.images_data:
@@ -293,7 +379,11 @@ class LibraryManagerDialog(QDialog):
         else:
             self.loader_thread = None
         
-        self.status_bar.setText(f"已加载 {len(self.images_data)} 张图片")
+        self._sync_header_metrics(total_count, len(self.images_data))
+        if query and not self.images_data:
+            self.status_bar.setText(f"未找到匹配 \"{query}\" 的图片")
+        else:
+            self.status_bar.setText(f"已加载 {len(self.images_data)} 张图片")
         
     def _update_item_icon(self, img_id, q_image):
         """更新列表项图标"""
@@ -320,6 +410,7 @@ class LibraryManagerDialog(QDialog):
     def _on_selection_changed(self):
         """选中项改变"""
         self._update_selection_actions()
+        self._sync_header_metrics()
         items = self.list_widget.selectedItems()
         if not items:
             self._reset_detail_panel()

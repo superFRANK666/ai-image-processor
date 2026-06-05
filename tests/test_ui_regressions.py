@@ -238,6 +238,150 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertTrue(panel.preset_combo.isEnabled())
         self.assertTrue(panel.exposure_slider.isEnabled())
 
+    def test_ui_font_picker_prefers_available_chinese_friendly_font(self):
+        from src.ui.font_utils import choose_ui_font
+
+        self.assertEqual(
+            choose_ui_font(["Segoe UI", "Microsoft YaHei UI"]),
+            "Microsoft YaHei UI",
+        )
+        self.assertEqual(
+            choose_ui_font(["Segoe UI", "Arial"]),
+            "Segoe UI",
+        )
+        self.assertEqual(choose_ui_font([]), "Microsoft YaHei")
+
+    def test_image_viewer_empty_state_and_canvas_hud_follow_context(self):
+        from src.ui.image_viewer import ImageViewer
+
+        viewer = ImageViewer()
+        self.addCleanup(viewer.close)
+
+        opened = []
+        imported = []
+        viewer.open_requested.connect(lambda: opened.append(True))
+        viewer.import_requested.connect(lambda: imported.append(True))
+
+        self.assertFalse(viewer.empty_state.isHidden())
+        self.assertFalse(viewer.zoom_slider.isEnabled())
+
+        viewer.empty_open_btn.click()
+        viewer.empty_import_btn.click()
+        self.assertEqual(opened, [True])
+        self.assertEqual(imported, [True])
+
+        image = np.zeros((24, 48, 3), dtype=np.uint8)
+        viewer.set_image(image)
+        viewer.set_canvas_context(
+            file_path="F:/assets/studio-shot.png",
+            width=48,
+            height=24,
+            history_count=2,
+            library_count=8,
+            status="已更新",
+            detail="调色结果已更新到主画布。",
+        )
+
+        self.assertTrue(viewer.empty_state.isHidden())
+        self.assertTrue(viewer.zoom_slider.isEnabled())
+        self.assertEqual(viewer.asset_name_label.text(), "studio-shot.png")
+        self.assertIn("48 x 24px", viewer.asset_meta_label.text())
+        self.assertIn("历史 2 步", viewer.asset_meta_label.text())
+        self.assertIn("图库 8 张", viewer.asset_meta_label.text())
+        self.assertEqual(viewer.status_badge.property("tone"), "active")
+
+        viewer.set_compare_mode(image, image)
+        self.assertEqual(viewer.compare_badge.text(), "对比开启")
+        self.assertEqual(viewer.compare_badge.property("tone"), "active")
+
+    def test_image_viewer_processing_overlay_follows_busy_state(self):
+        from src.ui.image_viewer import ImageViewer
+
+        viewer = ImageViewer()
+        self.addCleanup(viewer.close)
+
+        viewer.set_canvas_context(status="处理中", detail="正在应用调色参数。")
+        self.assertFalse(viewer.processing_panel.isHidden())
+        self.assertTrue(viewer.empty_state.isHidden())
+        self.assertEqual(viewer.processing_title.text(), "正在处理")
+        self.assertEqual(viewer.processing_detail.text(), "正在应用调色参数。")
+
+        viewer.set_canvas_context(status="已更新", detail="调色结果已更新到主画布。")
+        self.assertTrue(viewer.processing_panel.isHidden())
+        self.assertFalse(viewer.empty_state.isHidden())
+
+        viewer.set_image(np.zeros((8, 8, 3), dtype=np.uint8))
+        viewer.set_canvas_context(status="处理中", detail="正在生成旋转动画。")
+        self.assertFalse(viewer.processing_panel.isHidden())
+        self.assertTrue(viewer.zoom_slider.isEnabled())
+
+    def test_command_palette_filters_and_triggers_enabled_commands(self):
+        from src.ui.command_palette import CommandDefinition, CommandPalette
+
+        triggered = []
+        palette = CommandPalette([
+            CommandDefinition(
+                "open",
+                "打开素材",
+                "选择图片",
+                ("open", "image", "素材"),
+                lambda: triggered.append("open"),
+            ),
+            CommandDefinition(
+                "save",
+                "保存结果",
+                "写回文件",
+                ("save", "export", "保存"),
+                lambda: triggered.append("save"),
+                enabled=False,
+            ),
+        ])
+        self.addCleanup(palette.close)
+
+        self.assertEqual(palette.command_list.count(), 2)
+        palette.search_input.setText("save")
+        self.assertEqual(palette.command_list.count(), 1)
+        palette.trigger_current()
+        self.assertEqual(triggered, [])
+
+        palette.search_input.setText("open")
+        palette.trigger_current()
+        self.assertEqual(triggered, ["open"])
+
+    def test_color_panel_look_preset_actions_follow_context(self):
+        from src.ui.color_grading_panel import ColorGradingPanel
+
+        panel = ColorGradingPanel()
+        emitted = []
+        deleted = []
+        saved = []
+        panel.look_apply_requested.connect(emitted.append)
+        panel.delete_look_requested.connect(deleted.append)
+        panel.save_look_requested.connect(lambda: saved.append(True))
+
+        panel.set_look_presets([
+            {"id": "builtin-film", "name": "电影感", "source": "builtin", "params": {}},
+            {"id": "custom-soft", "name": "柔和人像", "source": "custom", "params": {}},
+        ])
+
+        panel.look_combo.setCurrentIndex(1)
+        self.assertFalse(panel.look_apply_btn.isEnabled())
+        self.assertFalse(panel.delete_look_btn.isEnabled())
+
+        panel.set_image_available(True)
+        self.assertTrue(panel.look_apply_btn.isEnabled())
+        self.assertFalse(panel.delete_look_btn.isEnabled())
+        panel.look_apply_btn.click()
+        self.assertEqual(emitted, ["builtin-film"])
+
+        panel.look_combo.setCurrentIndex(2)
+        self.assertTrue(panel.delete_look_btn.isEnabled())
+        panel.delete_look_btn.click()
+        self.assertEqual(deleted, ["custom-soft"])
+
+        panel.save_look_btn.click()
+        self.assertEqual(saved, [True])
+
     def test_thumbnail_size_never_rounds_down_to_zero(self):
         from src.ui.ui_utils import fit_thumbnail_size, fit_within_size
 
@@ -266,15 +410,53 @@ class ColorPanelRegressionTests(unittest.TestCase):
             ]
 
             panel = ImageLibraryPanel()
+            self.addCleanup(panel.close)
             shown_count = panel.show_search_results(results)
             self.assertEqual(shown_count, 1)
             self.assertEqual(len(panel._thumbnails), 1)
             self.assertIsNotNone(panel.thumbnail_layout.itemAtPosition(0, 0))
+            self.assertEqual(panel.visible_value_label.text(), "1 张")
 
             dialog = ImagePickerDialog()
+            self.addCleanup(dialog.close)
             dialog._show_thumbnails(results)
             self.assertEqual(len(dialog._thumbnails), 1)
             self.assertIsNotNone(dialog.thumbnail_layout.itemAtPosition(0, 0))
+
+    def test_image_library_summary_and_empty_states_track_results(self):
+        from src.ui.image_library_panel import ImageLibraryPanel
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "valid.png"
+            missing_path = Path(tmp) / "missing.png"
+            cv2.imwrite(str(image_path), np.full((8, 8, 3), 127, dtype=np.uint8))
+
+            image_db = FakeLibraryDb([
+                {"id": "valid", "path": str(image_path), "metadata": {"name": "valid"}},
+                {"id": "missing", "path": str(missing_path), "metadata": {"name": "missing"}},
+            ])
+            panel = ImageLibraryPanel(image_db)
+            self.addCleanup(panel.close)
+            panel.refresh()
+
+            self.assertEqual(panel.total_value_label.text(), "2 张")
+            self.assertEqual(panel.visible_value_label.text(), "1 张")
+            self.assertEqual(panel.group_value_label.text(), "全部")
+            self.assertEqual(panel.library_state_badge.text(), "就绪")
+            self.assertIsNone(panel.empty_state)
+
+            panel.search_input.setText("not-found")
+            panel._on_search()
+
+            self.assertEqual(panel.visible_value_label.text(), "0 张")
+            self.assertEqual(panel.empty_title_label.text(), "没有匹配结果")
+            self.assertIn("not-found", panel.empty_subtitle_label.text())
+
+            shown_count = panel.show_search_results([
+                {"id": "missing", "path": str(missing_path), "metadata": {"name": "missing"}}
+            ])
+            self.assertEqual(shown_count, 0)
+            self.assertEqual(panel.empty_title_label.text(), "没有可显示的素材")
 
     def test_agi_exports_warn_when_animation_is_missing(self):
         from PySide6.QtWidgets import QMessageBox
@@ -373,6 +555,168 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertFalse(panel.point_mode_btn.isEnabled())
         self.assertFalse(panel.generate_object_3d_btn.isEnabled())
 
+    def test_agi_selection_overlay_drawing_uses_display_scale(self):
+        from src.ui.agi_camera_panel import ClickableImageLabel
+
+        label = ClickableImageLabel()
+        self.addCleanup(label.close)
+        label.resize(420, 360)
+        label.set_image(np.full((120, 200, 3), 127, dtype=np.uint8))
+
+        label.set_selection_mode("box")
+        label._drawing_box = True
+        label._box_start = (10, 12)
+        label._box_end = (150, 90)
+        label._update_display()
+        self.assertIsNotNone(label._pixmap)
+        self.assertFalse(label._pixmap.isNull())
+
+        label.set_selection_mode("path")
+        label._drawing_path = True
+        label._path_img_points = [(5, 5), (40, 30), (90, 60)]
+        label._update_display()
+        self.assertIsNotNone(label._pixmap)
+        self.assertFalse(label._pixmap.isNull())
+
+    def test_workflow_panel_tracks_metrics_models_and_activity(self):
+        from src.ui.workflow_panel import WorkflowMetrics, WorkflowPanel
+
+        panel = WorkflowPanel()
+        self.addCleanup(panel.close)
+
+        self.assertFalse(panel.grade_btn.isEnabled())
+        panel.update_metrics(WorkflowMetrics(
+            file_path="C:/tmp/project/hero.png",
+            width=640,
+            height=480,
+            history_count=2,
+            library_count=7,
+            has_mesh=True,
+            has_animation=True,
+            has_selection=True,
+        ))
+
+        self.assertEqual(panel.file_value.text(), "hero.png")
+        self.assertEqual(panel.size_value.text(), "640 x 480")
+        self.assertEqual(panel.history_value.text(), "2 步")
+        self.assertEqual(panel.library_value.text(), "7 张")
+        self.assertIn("3D 模型", panel.asset_value.text())
+        self.assertTrue(panel.grade_btn.isEnabled())
+        self.assertEqual(panel.step_labels["load"].property("complete"), True)
+
+        panel.update_model_state("image_db", "loading")
+        self.assertEqual(panel.model_labels["image_db"].text(), "加载中")
+        panel.update_model_state("image_db", "loaded")
+        self.assertEqual(panel.model_labels["image_db"].text(), "就绪")
+        panel.update_model_state("image_db", "failed")
+        self.assertEqual(panel.model_labels["image_db"].text(), "失败")
+
+        for index in range(10):
+            panel.add_activity(f"activity {index}")
+        self.assertEqual(panel.activity_list.count(), 8)
+        self.assertEqual(panel.activity_list.item(0).text(), "activity 9")
+
+    def test_main_window_command_center_tracks_context_and_workflow_actions(self):
+        from PySide6.QtGui import QAction
+        from PySide6.QtWidgets import QLabel, QPushButton
+        from src.ui.main_window import MainWindow
+
+        fake = SimpleNamespace(
+            current_image=None,
+            current_file_path=None,
+            image_db=None,
+            _history_stack=[],
+            _canvas_status="等待素材",
+            _canvas_detail="打开或拖入素材开始处理。",
+            command_asset_label=QLabel(),
+            command_meta_label=QLabel(),
+            command_status_badge=QLabel(),
+            command_grade_btn=QPushButton(),
+            command_agi_btn=QPushButton(),
+            command_save_btn=QPushButton(),
+            command_compare_btn=QPushButton(),
+            compare_btn=QAction("对比", None),
+            _refresh_workflow_panel=lambda: None,
+        )
+        fake.command_compare_btn.setCheckable(True)
+        fake.compare_btn.setCheckable(True)
+        fake._set_compare_checked = lambda checked: MainWindow._set_compare_checked(fake, checked)
+        fake._tone_for_status = lambda status: MainWindow._tone_for_status(fake, status)
+        fake._refresh_command_center = (
+            lambda metrics=None, library_count=None:
+            MainWindow._refresh_command_center(fake, metrics, library_count)
+        )
+
+        MainWindow._update_action_states(fake)
+        self.assertFalse(fake.command_grade_btn.isEnabled())
+        self.assertFalse(fake.command_save_btn.isEnabled())
+
+        fake.current_image = np.full((12, 16, 3), 127, dtype=np.uint8)
+        fake.current_file_path = "F:/project/hero.png"
+        fake.image_db = FakeLibraryDb([{"id": "one"}, {"id": "two"}])
+        fake._history_stack.append({"image": fake.current_image.copy(), "params": None})
+
+        MainWindow._set_canvas_status(fake, "就绪", "素材已载入")
+        MainWindow._update_action_states(fake)
+
+        self.assertEqual(fake.command_asset_label.text(), "hero.png")
+        self.assertIn("16 x 12px", fake.command_meta_label.text())
+        self.assertIn("历史 1 步", fake.command_meta_label.text())
+        self.assertIn("图库 2 张", fake.command_meta_label.text())
+        self.assertEqual(fake.command_status_badge.property("tone"), "active")
+        self.assertTrue(fake.command_grade_btn.isEnabled())
+        self.assertTrue(fake.command_save_btn.isEnabled())
+
+        MainWindow._set_compare_checked(fake, True)
+        self.assertTrue(fake.command_compare_btn.isChecked())
+        self.assertTrue(fake.compare_btn.isChecked())
+
+        calls = []
+        fake.toggle_compare = calls.append
+        MainWindow._on_command_compare_toggled(fake, False)
+        self.assertEqual(calls, [False])
+
+    def test_main_window_command_definitions_follow_context(self):
+        from PySide6.QtWidgets import QPushButton
+        from src.ui.main_window import MainWindow
+
+        def noop():
+            pass
+
+        fake = SimpleNamespace(
+            current_image=None,
+            _history_stack=[],
+            command_compare_btn=QPushButton(),
+            open_image=noop,
+            _open_import_workflow=noop,
+            _focus_workbench=noop,
+            _focus_color_workflow=noop,
+            _focus_agi_workflow=noop,
+            _focus_library_workflow=noop,
+            save_image=noop,
+            toggle_compare=lambda _checked: None,
+            undo=noop,
+            reset_image=noop,
+            image_viewer=SimpleNamespace(fit_to_view=noop),
+            find_similar_images=noop,
+        )
+        fake.command_compare_btn.setCheckable(True)
+
+        commands = {command.id: command for command in MainWindow._build_command_definitions(fake)}
+        self.assertTrue(commands["open-image"].enabled)
+        self.assertFalse(commands["save-image"].enabled)
+        self.assertFalse(commands["toggle-compare"].enabled)
+        self.assertFalse(commands["undo"].enabled)
+
+        fake.current_image = np.full((4, 4, 3), 127, dtype=np.uint8)
+        fake._history_stack.append({"image": fake.current_image.copy(), "params": None})
+        fake.command_compare_btn.setChecked(True)
+
+        commands = {command.id: command for command in MainWindow._build_command_definitions(fake)}
+        self.assertTrue(commands["save-image"].enabled)
+        self.assertTrue(commands["toggle-compare"].enabled)
+        self.assertTrue(commands["undo"].enabled)
+
     def test_library_manager_selection_state_clears_detail_panel(self):
         with tempfile.TemporaryDirectory() as tmp:
             image_path = Path(tmp) / "valid.png"
@@ -385,6 +729,9 @@ class ColorPanelRegressionTests(unittest.TestCase):
             self.assertEqual(dialog.list_widget.count(), 1)
             self.assertFalse(dialog.btn_delete.isEnabled())
             self.assertEqual(dialog.lbl_filename.text(), "-")
+            self.assertEqual(dialog.total_value_label.text(), "1 张")
+            self.assertEqual(dialog.loaded_value_label.text(), "1 张")
+            self.assertEqual(dialog.selected_value_label.text(), "0 张")
 
             dialog.list_widget.setCurrentRow(0)
             self.app.processEvents()
@@ -392,6 +739,7 @@ class ColorPanelRegressionTests(unittest.TestCase):
             self.assertTrue(dialog.btn_delete.isEnabled())
             self.assertEqual(dialog.lbl_filename.text(), image_path.name)
             self.assertEqual(dialog.lbl_resolution.text(), "8 x 6")
+            self.assertEqual(dialog.selected_value_label.text(), "1 张")
 
             dialog.list_widget.clearSelection()
             self.app.processEvents()
@@ -400,6 +748,7 @@ class ColorPanelRegressionTests(unittest.TestCase):
             self.assertEqual(dialog.lbl_filename.text(), "-")
             self.assertEqual(dialog.lbl_resolution.text(), "-")
             self.assertEqual(dialog.img_preview.text(), "无预览")
+            self.assertEqual(dialog.selected_value_label.text(), "0 张")
 
     def test_library_manager_context_delete_targets_right_clicked_item(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -459,6 +808,20 @@ class ColorPanelRegressionTests(unittest.TestCase):
             warning.assert_called_once()
             self.assertIn("无法打开文件位置", dialog.status_bar.text())
 
+    def test_library_manager_search_failure_stays_visible(self):
+        from src.ui.library_manager_dialog import LibraryManagerDialog
+
+        dialog = LibraryManagerDialog(FakeLibraryDb([], fail_search=True))
+        self.addCleanup(dialog.close)
+        dialog.search_input.setText("风景")
+        dialog._on_search()
+
+        self.assertEqual(dialog.list_widget.count(), 0)
+        self.assertEqual(dialog.lbl_page.text(), "加载失败")
+        self.assertEqual(dialog.loaded_value_label.text(), "0 张")
+        self.assertEqual(dialog.total_value_label.text(), "0 张")
+        self.assertEqual(dialog.status_bar.text(), "加载失败: index offline")
+
     def test_image_picker_empty_state_disables_selection_actions(self):
         from src.ui.image_picker_dialog import ImagePickerDialog
 
@@ -470,6 +833,9 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertFalse(dialog.tab_widget.isTabEnabled(1))
         self.assertFalse(dialog.search_btn.isEnabled())
         self.assertEqual(dialog.status_label.text(), "图像库未初始化")
+        self.assertEqual(dialog.source_value_label.text(), "文件系统")
+        self.assertEqual(dialog.library_value_label.text(), "未连接")
+        self.assertEqual(dialog.selected_value_label.text(), "0 张")
 
         with mock.patch("src.ui.image_picker_dialog.QMessageBox.information") as information:
             dialog._accept_selection()
@@ -497,11 +863,13 @@ class ColorPanelRegressionTests(unittest.TestCase):
             self.assertTrue(dialog.clear_btn.isEnabled())
             self.assertIn("first.png", dialog.selection_list.text())
             self.assertIn("second.png", dialog.selection_list.text())
+            self.assertEqual(dialog.selected_value_label.text(), "2 张")
 
             dialog._clear_selection()
             self.assertFalse(dialog.ok_btn.isEnabled())
             self.assertFalse(dialog.clear_btn.isEnabled())
             self.assertEqual(dialog.selection_list.text(), "无")
+            self.assertEqual(dialog.selected_value_label.text(), "0 张")
 
     def test_image_picker_library_refresh_and_search_statuses(self):
         from src.ui.image_picker_dialog import ImagePickerDialog
@@ -521,12 +889,16 @@ class ColorPanelRegressionTests(unittest.TestCase):
             self.assertTrue(dialog.tab_widget.isTabEnabled(1))
             self.assertEqual(len(dialog._thumbnails), 1)
             self.assertEqual(dialog.status_label.text(), "图像库: 2 张图片，当前显示 1 张")
+            self.assertEqual(dialog.library_value_label.text(), "1 / 2 张")
 
+            dialog.tab_widget.setCurrentIndex(1)
+            self.assertEqual(dialog.source_value_label.text(), "图像库")
             dialog.search_input.setText("missing")
             dialog._on_search()
 
             self.assertEqual(len(dialog._thumbnails), 0)
             self.assertEqual(dialog.status_label.text(), "未找到匹配 \"missing\" 的图片")
+            self.assertEqual(dialog.library_value_label.text(), "0 / 2 张")
 
     def test_image_picker_single_select_replaces_previous_thumbnail_choice(self):
         from src.ui.image_picker_dialog import ImagePickerDialog
@@ -551,6 +923,7 @@ class ColorPanelRegressionTests(unittest.TestCase):
             self.assertEqual(dialog.get_selected_paths(), [str(second_path)])
             self.assertFalse(first_thumb.is_selected())
             self.assertTrue(second_thumb.is_selected())
+            self.assertEqual(dialog.selected_value_label.text(), "1 张")
 
     def test_image_library_unavailable_database_disables_library_actions(self):
         from src.ui.image_library_panel import ImageLibraryPanel
@@ -567,6 +940,12 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertTrue(panel.import_btn.isEnabled())
         self.assertEqual(panel.status_label.text(), "图像库未初始化")
         self.assertEqual(panel.search_input.placeholderText(), "图像库加载后可搜索...")
+        self.assertEqual(panel.total_value_label.text(), "--")
+        self.assertEqual(panel.visible_value_label.text(), "0 张")
+        self.assertEqual(panel.group_value_label.text(), "未连接")
+        self.assertEqual(panel.library_state_badge.text(), "未连接")
+        self.assertEqual(panel.library_state_badge.property("tone"), "offline")
+        self.assertEqual(panel.empty_title_label.text(), "图像库正在准备")
 
         panel.set_database(FakeLibraryDb([]))
 
@@ -577,6 +956,11 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertTrue(panel.new_group_btn.isEnabled())
         self.assertTrue(panel.group_combo.isEnabled())
         self.assertEqual(panel.search_input.placeholderText(), "搜索图像...")
+        self.assertEqual(panel.total_value_label.text(), "0 张")
+        self.assertEqual(panel.visible_value_label.text(), "0 张")
+        self.assertEqual(panel.group_value_label.text(), "全部")
+        self.assertEqual(panel.library_state_badge.text(), "就绪")
+        self.assertEqual(panel.empty_title_label.text(), "素材库为空")
 
     def test_image_library_group_names_are_validated_and_normalized(self):
         from src.ui.image_library_panel import ImageLibraryPanel

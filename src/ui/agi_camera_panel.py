@@ -37,7 +37,7 @@ class ClickableImageLabel(QWidget):
         super().__init__()
         self.setMinimumSize(400, 350)  # 增大最小尺寸以便精准选择
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 允许扩展
-        self.setStyleSheet("background: #1a1a1a; border: 1px solid #404040;")
+        self.setObjectName("selectionViewport")
 
         # 启用鼠标追踪
         self.setMouseTracking(True)
@@ -102,16 +102,19 @@ class ClickableImageLabel(QWidget):
 
         # 如果正在绘制框选
         if self._drawing_box and self._box_start and self._box_end:
-            x1 = int(self._box_start[0] * scale)
-            y1 = int(self._box_start[1] * scale)
-            x2 = int(self._box_end[0] * scale)
-            y2 = int(self._box_end[1] * scale)
+            x1 = int(self._box_start[0] * self._display_scale)
+            y1 = int(self._box_start[1] * self._display_scale)
+            x2 = int(self._box_end[0] * self._display_scale)
+            y2 = int(self._box_end[1] * self._display_scale)
             cv2.rectangle(display_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
         # 如果正在绘制划线路径
         if self._drawing_path and len(self._path_img_points) > 1:
             # 将图像坐标的路径点转换为显示坐标
-            scaled_points = [(int(p[0] * scale), int(p[1] * scale)) for p in self._path_img_points]
+            scaled_points = [
+                (int(p[0] * self._display_scale), int(p[1] * self._display_scale))
+                for p in self._path_img_points
+            ]
             # 绘制路径
             for i in range(len(scaled_points) - 1):
                 cv2.line(display_image, scaled_points[i], scaled_points[i+1], (0, 255, 255), 3)
@@ -304,10 +307,10 @@ class AnimationPreview(QLabel):
 
     def __init__(self):
         super().__init__()
+        self.setObjectName("animationPreview")
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(400, 350)  # 增大最小尺寸以便完整预览
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 允许扩展
-        self.setStyleSheet("background: #1a1a1a; border: 1px solid #404040;")
 
         self._frames: List[np.ndarray] = []
         self._current_frame = 0
@@ -452,17 +455,20 @@ class AGICameraPanel(QWidget):
         mode_layout.addWidget(QLabel("选择模式:"))
 
         self.point_mode_btn = QPushButton("点选")
+        self.point_mode_btn.setProperty("variant", "secondary")
         self.point_mode_btn.setCheckable(True)
         self.point_mode_btn.setChecked(True)
         self.point_mode_btn.setMinimumWidth(50)
         mode_layout.addWidget(self.point_mode_btn)
 
         self.box_mode_btn = QPushButton("框选")
+        self.box_mode_btn.setProperty("variant", "secondary")
         self.box_mode_btn.setCheckable(True)
         self.box_mode_btn.setMinimumWidth(50)
         mode_layout.addWidget(self.box_mode_btn)
 
         self.path_mode_btn = QPushButton("划线")
+        self.path_mode_btn.setProperty("variant", "secondary")
         self.path_mode_btn.setCheckable(True)
         self.path_mode_btn.setMinimumWidth(50)
         mode_layout.addWidget(self.path_mode_btn)
@@ -470,6 +476,7 @@ class AGICameraPanel(QWidget):
         mode_layout.addStretch()
 
         self.clear_selection_btn = QPushButton("清除选择")
+        self.clear_selection_btn.setProperty("variant", "secondary")
         self.clear_selection_btn.setMinimumWidth(70)
         mode_layout.addWidget(self.clear_selection_btn)
 
@@ -481,7 +488,8 @@ class AGICameraPanel(QWidget):
 
         # 选择状态
         self.selection_status = QLabel("提示: 点击图像中的物体进行选择")
-        self.selection_status.setStyleSheet("color: #888;")
+        self.selection_status.setObjectName("selectionStatus")
+        self.selection_status.setProperty("state", "idle")
         selection_layout.addWidget(self.selection_status)
 
         layout.addWidget(selection_group)
@@ -497,10 +505,12 @@ class AGICameraPanel(QWidget):
         control_layout = QHBoxLayout()
 
         self.play_btn = QPushButton("播放")
+        self.play_btn.setProperty("variant", "secondary")
         self.play_btn.setCheckable(True)
         control_layout.addWidget(self.play_btn)
 
         self.stop_btn = QPushButton("停止")
+        self.stop_btn.setProperty("variant", "secondary")
         control_layout.addWidget(self.stop_btn)
 
         control_layout.addStretch()
@@ -582,7 +592,7 @@ class AGICameraPanel(QWidget):
 
         # 说明文字
         multiview_hint = QLabel("上传同一物体的多角度照片，可获得更精确的3D模型")
-        multiview_hint.setStyleSheet("color: #888; font-size: 11px;")
+        multiview_hint.setObjectName("sectionHint")
         multiview_hint.setWordWrap(True)
         multiview_layout.addWidget(multiview_hint)
 
@@ -594,10 +604,12 @@ class AGICameraPanel(QWidget):
         multiview_btn_layout = QHBoxLayout()
 
         self.add_views_btn = QPushButton("添加图片")
+        self.add_views_btn.setProperty("variant", "secondary")
         self.add_views_btn.setMinimumWidth(80)
         multiview_btn_layout.addWidget(self.add_views_btn)
 
         self.clear_views_btn = QPushButton("清空")
+        self.clear_views_btn.setProperty("variant", "secondary")
         self.clear_views_btn.setMinimumWidth(60)
         multiview_btn_layout.addWidget(self.clear_views_btn)
 
@@ -606,9 +618,9 @@ class AGICameraPanel(QWidget):
 
         # 多视角生成按钮
         self.generate_multiview_3d_btn = QPushButton("多视角3D重建")
+        self.generate_multiview_3d_btn.setProperty("variant", "primary")
         self.generate_multiview_3d_btn.setMinimumHeight(40)
         self.generate_multiview_3d_btn.setEnabled(False)
-        self.generate_multiview_3d_btn.setStyleSheet("QPushButton:disabled { color: #666; }")
         multiview_layout.addWidget(self.generate_multiview_3d_btn)
 
         layout.addWidget(multiview_group)
@@ -617,16 +629,18 @@ class AGICameraPanel(QWidget):
         btn_layout = QVBoxLayout()
 
         self.generate_3d_btn = QPushButton("生成整图3D模型")
+        self.generate_3d_btn.setProperty("variant", "primary")
         self.generate_3d_btn.setMinimumHeight(40)
         btn_layout.addWidget(self.generate_3d_btn)
 
         self.generate_object_3d_btn = QPushButton("生成选中物体3D")
+        self.generate_object_3d_btn.setProperty("variant", "primary")
         self.generate_object_3d_btn.setMinimumHeight(40)
         self.generate_object_3d_btn.setEnabled(False)
-        self.generate_object_3d_btn.setStyleSheet("QPushButton:disabled { color: #666; }")
         btn_layout.addWidget(self.generate_object_3d_btn)
 
         self.generate_anim_btn = QPushButton("生成旋转动画")
+        self.generate_anim_btn.setProperty("variant", "secondary")
         self.generate_anim_btn.setMinimumHeight(40)
         btn_layout.addWidget(self.generate_anim_btn)
 
@@ -637,12 +651,15 @@ class AGICameraPanel(QWidget):
         export_layout = QHBoxLayout(export_group)
 
         self.export_model_btn = QPushButton("导出3D模型")
+        self.export_model_btn.setProperty("variant", "secondary")
         export_layout.addWidget(self.export_model_btn)
 
         self.export_gif_btn = QPushButton("导出GIF")
+        self.export_gif_btn.setProperty("variant", "secondary")
         export_layout.addWidget(self.export_gif_btn)
 
         self.export_video_btn = QPushButton("导出视频")
+        self.export_video_btn.setProperty("variant", "secondary")
         export_layout.addWidget(self.export_video_btn)
 
         layout.addWidget(export_group)
@@ -760,7 +777,7 @@ class AGICameraPanel(QWidget):
         self._has_selection = False
         self._update_generation_actions()
         self.selection_status.setText("提示: 点击图像中的物体进行选择")
-        self.selection_status.setStyleSheet("color: #888;")
+        self._set_selection_status_state("idle")
 
         # 恢复原始图像显示（清除选择高亮）
         if hasattr(self, '_pending_image') and self._pending_image is not None:
@@ -791,10 +808,16 @@ class AGICameraPanel(QWidget):
         self._update_generation_actions()
         if success:
             self.selection_status.setText("已选中物体 - 可以生成3D")
-            self.selection_status.setStyleSheet("color: #4CAF50;")
+            self._set_selection_status_state("success")
         else:
             self.selection_status.setText(message or "选择失败，请重试")
-            self.selection_status.setStyleSheet("color: #f44336;")
+            self._set_selection_status_state("error")
+
+    def _set_selection_status_state(self, state: str):
+        """刷新选择状态标签的视觉状态。"""
+        self.selection_status.setProperty("state", state)
+        self.selection_status.style().unpolish(self.selection_status)
+        self.selection_status.style().polish(self.selection_status)
 
     def update_selection_preview(self, image: np.ndarray):
         """更新选择预览图像"""
@@ -899,6 +922,14 @@ class AGICameraPanel(QWidget):
         self._frames = frames or []
         self.preview.set_frames(self._frames)
         self._update_export_actions()
+
+    def has_animation_frames(self) -> bool:
+        """是否已有可导出的动画帧。"""
+        return bool(self._frames)
+
+    def has_selection(self) -> bool:
+        """是否已有有效物体选择。"""
+        return self._has_selection
 
     def get_current_mesh(self) -> Optional[Mesh3D]:
         """获取当前网格"""

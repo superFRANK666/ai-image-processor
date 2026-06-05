@@ -1,7 +1,7 @@
 [project]
 name = "ai-image-processor"
-version = "1.1.0"
-description = "AI全模态影像处理软件 - 一句话调色、图像检索、3D生成"
+version = "1.2.0"
+description = "AI全模态影像处理软件 - 智能调色、素材管理、语义检索、3D生成"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}

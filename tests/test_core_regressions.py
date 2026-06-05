@@ -171,6 +171,39 @@ class CoreRegressionTests(unittest.TestCase):
             ["image-a", "image-b"],
         )
 
+    def test_look_preset_store_persists_updates_and_blocks_builtin_delete(self):
+        from src.core.look_preset_store import LookPresetStore
+        from src.ai.nlp_color_parser import ColorGradingParams
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "looks.json"
+            store = LookPresetStore(store_path)
+
+            builtin = store.list_presets()[0]
+            self.assertEqual(builtin.source, "builtin")
+            self.assertFalse(store.delete_preset(builtin.id))
+
+            saved = store.save_preset(
+                "  Studio Look  ",
+                ColorGradingParams(exposure=0.2, contrast=1.15),
+                tags=["portrait", ""],
+            )
+            self.assertEqual(saved.name, "Studio Look")
+            self.assertEqual(saved.source, "custom")
+            self.assertTrue(store_path.exists())
+
+            reloaded = LookPresetStore(store_path)
+            loaded = reloaded.get_preset(saved.id)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.params["contrast"], 1.15)
+
+            updated = reloaded.save_preset("Studio Look", {"contrast": 1.3})
+            self.assertEqual(updated.id, saved.id)
+            self.assertEqual(reloaded.get_preset(saved.id).params["contrast"], 1.3)
+
+            self.assertTrue(reloaded.delete_preset(saved.id))
+            self.assertIsNone(reloaded.get_preset(saved.id))
+
 
 if __name__ == "__main__":
     unittest.main()

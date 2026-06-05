@@ -13,7 +13,7 @@ from ..utils.image_io import imread as imread_safe
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QGridLayout, QLineEdit, QMenu, QComboBox, QInputDialog,
-    QMessageBox
+    QMessageBox, QFrame
 )
 from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtGui import QPixmap, QImage, QCursor
@@ -53,23 +53,19 @@ class ImageThumbnailWidget(QWidget):
         
         # 图片容器
         self.img_label = QLabel()
+        self.img_label.setObjectName("thumbnailImage")
         self.img_label.setFixedSize(size, size)
         self.img_label.setAlignment(Qt.AlignCenter)
-        self.img_label.setStyleSheet("""
-            QLabel {
-                background: #2d2d2d;
-                border: 2px solid #404040;
-                border-radius: 4px;
-            }
-        """)
         self.img_label.setCursor(Qt.PointingHandCursor)
+        self.img_label.setProperty("selected", False)
         self._load_thumbnail(size)
         layout.addWidget(self.img_label)
         
         # 文字标签
         self.name_label = QLabel(self.img_name)
+        self.name_label.setObjectName("thumbnailName")
         self.name_label.setAlignment(Qt.AlignCenter)
-        self.name_label.setStyleSheet("color: #cccccc; font-size: 11px;")
+        self.name_label.setProperty("selected", False)
         
         # 省略长文本
         font_metrics = self.name_label.fontMetrics()
@@ -98,12 +94,11 @@ class ImageThumbnailWidget(QWidget):
             self.img_label.setText("Err")
             
     def set_selected(self, selected: bool):
-        if selected:
-            self.img_label.setStyleSheet("QLabel { background: #404040; border: 2px solid #0078d4; border-radius: 4px; }")
-            self.name_label.setStyleSheet("color: #0078d4; font-weight: bold; font-size: 11px;")
-        else:
-            self.img_label.setStyleSheet("QLabel { background: #2d2d2d; border: 2px solid #404040; border-radius: 4px; }")
-            self.name_label.setStyleSheet("color: #cccccc; font-size: 11px;")
+        self.img_label.setProperty("selected", selected)
+        self.name_label.setProperty("selected", selected)
+        for widget in (self.img_label, self.name_label):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -198,6 +193,8 @@ class ImageLibraryPanel(QWidget):
         self._rebuild_thread: Optional[RebuildIndexThread] = None
         self._rebuild_progress = None
         self._thumbnails: List[ImageThumbnailWidget] = []
+        self.empty_state: Optional[QFrame] = None
+        self.selected_thumb = None
         self._setup_ui()
 
     def set_database(self, image_db: "ImageIndexDatabase"):
@@ -208,16 +205,56 @@ class ImageLibraryPanel(QWidget):
     def _setup_ui(self):
         """设置UI"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(5)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
-        # 搜索栏
-        search_layout = QHBoxLayout()
+        header_frame = QFrame()
+        header_frame.setObjectName("libraryHeader")
+        header = QVBoxLayout(header_frame)
+        header.setContentsMargins(14, 12, 14, 12)
+        header.setSpacing(8)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(8)
+        title_copy = QVBoxLayout()
+        title_copy.setContentsMargins(0, 0, 0, 0)
+        title_copy.setSpacing(2)
+        self.title_label = QLabel("素材库")
+        self.title_label.setObjectName("libraryTitle")
+        self.subtitle_label = QLabel("组织、检索和复用当前项目的视觉素材。")
+        self.subtitle_label.setObjectName("librarySubtitle")
+        self.subtitle_label.setWordWrap(True)
+        title_copy.addWidget(self.title_label)
+        title_copy.addWidget(self.subtitle_label)
+        title_row.addLayout(title_copy)
+        title_row.addStretch()
+        self.library_state_badge = QLabel("准备中")
+        self.library_state_badge.setObjectName("libraryStateBadge")
+        title_row.addWidget(self.library_state_badge, 0, Qt.AlignTop)
+        header.addLayout(title_row)
+
+        summary_strip = QFrame()
+        summary_strip.setObjectName("librarySummaryStrip")
+        summary_layout = QHBoxLayout(summary_strip)
+        summary_layout.setContentsMargins(10, 8, 10, 8)
+        summary_layout.setSpacing(8)
+        self.total_value_label = self._create_summary_metric(summary_layout, "总素材", "--")
+        self.visible_value_label = self._create_summary_metric(summary_layout, "当前显示", "0 张")
+        self.group_value_label = self._create_summary_metric(summary_layout, "分组", "全部")
+        header.addWidget(summary_strip)
+        layout.addWidget(header_frame)
+
+        # 搜索与分组筛选
+        filter_layout = QHBoxLayout()
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(8)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("搜索图像...")
+        self.search_input.setObjectName("librarySearch")
+        self.search_input.setPlaceholderText("搜索图像、风格或标签...")
         self.search_input.returnPressed.connect(self._on_search)
-        search_layout.addWidget(self.search_input)
+        filter_layout.addWidget(self.search_input, 1)
 
         # 分组筛选
         self.group_combo = QComboBox()
@@ -226,34 +263,21 @@ class ImageLibraryPanel(QWidget):
         self.group_combo.currentIndexChanged.connect(self._on_group_changed)
         self.group_combo.setContextMenuPolicy(Qt.CustomContextMenu)
         self.group_combo.customContextMenuRequested.connect(self._on_group_context_menu)
-        search_layout.addWidget(self.group_combo)
+        filter_layout.addWidget(self.group_combo)
 
         # 新建分组
         self.new_group_btn = QPushButton()
         self.new_group_btn.setText("+")
         self.new_group_btn.setFixedSize(28, 28)
         self.new_group_btn.setToolTip("新建分组")
-        # 使用样式表美化 "+" 号
-        self.new_group_btn.setStyleSheet("""
-            QPushButton {
-                font-weight: bold;
-                font-size: 18px;
-                font-family: Arial, sans-serif;
-                background-color: #3c3c3c;
-                border: 1px solid #555555;
-                border-radius: 4px;
-                color: #e0e0e0;
-                padding: 0px;
-                padding-bottom: 3px;
-            }
-            QPushButton:hover {
-                background-color: #4a4a4a;
-                color: #ffffff;
-                border-color: #0078d4;
-            }
-        """)
+        self.new_group_btn.setProperty("variant", "secondary")
         self.new_group_btn.clicked.connect(self._on_new_group)
-        search_layout.addWidget(self.new_group_btn)
+        filter_layout.addWidget(self.new_group_btn)
+        layout.addLayout(filter_layout)
+
+        action_layout = QHBoxLayout()
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(8)
         
         # 增加重命名图片按钮 (移除，改为双击名称)
         # self.rename_btn = QPushButton("命名")
@@ -264,25 +288,30 @@ class ImageLibraryPanel(QWidget):
 
 
         self.import_btn = QPushButton("导入")
+        self.import_btn.setProperty("variant", "primary")
         self.import_btn.setToolTip("导入图片到库")
         self.import_btn.clicked.connect(self._on_import_btn_clicked)
-        search_layout.addWidget(self.import_btn)
+        action_layout.addWidget(self.import_btn)
 
         self.search_btn = QPushButton("搜索")
+        self.search_btn.setProperty("variant", "secondary")
         self.search_btn.clicked.connect(self._on_search)
-        search_layout.addWidget(self.search_btn)
+        action_layout.addWidget(self.search_btn)
 
         self.refresh_btn = QPushButton("刷新")
+        self.refresh_btn.setProperty("variant", "secondary")
         self.refresh_btn.clicked.connect(self.refresh)
-        search_layout.addWidget(self.refresh_btn)
+        action_layout.addWidget(self.refresh_btn)
 
         # 重建索引按钮
         self.rebuild_btn = QPushButton("重建索引")
+        self.rebuild_btn.setProperty("variant", "secondary")
         self.rebuild_btn.setToolTip("重建所有图片的语义索引（用于改进搜索）")
         self.rebuild_btn.clicked.connect(self._on_rebuild_index)
-        search_layout.addWidget(self.rebuild_btn)
+        action_layout.addWidget(self.rebuild_btn)
+        action_layout.addStretch()
 
-        layout.addLayout(search_layout)
+        layout.addLayout(action_layout)
 
         # 状态标签
         count = 0
@@ -292,22 +321,48 @@ class ImageLibraryPanel(QWidget):
             except Exception:
                 pass
         self.status_label = QLabel(f"图像库: {count} 张图片")
+        self.status_label.setObjectName("mutedText")
         layout.addWidget(self.status_label)
+
+        self.summary_label = QLabel("等待图像库加载")
+        self.summary_label.setObjectName("librarySummaryText")
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
 
         # 缩略图滚动区域
         scroll_area = QScrollArea()
+        scroll_area.setObjectName("libraryScrollArea")
         scroll_area.setWidgetResizable(True)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll_area.setStyleSheet("QScrollArea { border: none; background: #1a1a1a; }")
 
         self.thumbnail_widget = QWidget()
+        self.thumbnail_widget.setObjectName("thumbnailGrid")
         self.thumbnail_layout = QGridLayout(self.thumbnail_widget)
-        self.thumbnail_layout.setSpacing(5)
+        self.thumbnail_layout.setContentsMargins(0, 0, 0, 0)
+        self.thumbnail_layout.setSpacing(8)
         self.thumbnail_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
         scroll_area.setWidget(self.thumbnail_widget)
         layout.addWidget(scroll_area)
         self._update_library_controls()
+
+    def _create_summary_metric(self, parent_layout: QHBoxLayout, name: str, value: str) -> QLabel:
+        metric = QFrame()
+        metric.setObjectName("libraryMetric")
+        metric_layout = QVBoxLayout(metric)
+        metric_layout.setContentsMargins(0, 0, 0, 0)
+        metric_layout.setSpacing(2)
+
+        name_label = QLabel(name)
+        name_label.setObjectName("libraryMetricName")
+        value_label = QLabel(value)
+        value_label.setObjectName("libraryMetricValue")
+        value_label.setWordWrap(False)
+
+        metric_layout.addWidget(name_label)
+        metric_layout.addWidget(value_label)
+        parent_layout.addWidget(metric, 1)
+        return value_label
 
     def refresh(self):
         """刷新图像列表"""
@@ -358,18 +413,42 @@ class ImageLibraryPanel(QWidget):
         )
         if not available:
             self.status_label.setText("图像库未初始化")
+            self._set_summary("素材库暂不可用。图像数据库加载完成后，可在这里检索和管理素材。")
+            self._sync_summary_metrics(0)
+            self._show_empty_state("图像库正在准备", "模型和索引加载完成后，素材会显示在这里。")
+        else:
+            self._sync_summary_metrics(len(self._thumbnails))
 
     def _load_images(self, group: str):
         """加载特定分组图像"""
         self._clear_thumbnails()
         if not self.image_db:
             self.status_label.setText("图像库未初始化")
+            self._set_summary("素材库暂不可用。")
+            self._show_empty_state("图像库未初始化", "请等待后台图像数据库加载完成。")
             return
 
         try:
             images = self.image_db.get_images_by_group(group, limit=50) # 简单取前50张
         except Exception as e:
             self.status_label.setText(f"加载图片失败: {e}")
+            self._set_summary("无法读取当前分组。")
+            self._show_empty_state("加载失败", str(e))
+            return
+
+        if not images:
+            total = 0
+            try:
+                total = self.image_db.get_image_count()
+            except Exception:
+                pass
+            self.status_label.setText(f"当前显示: 0 / 总计: {total}")
+            self._sync_summary_metrics(0, total)
+            self._set_summary(f"当前分组: {self.group_combo.currentText()} · 暂无素材")
+            if total:
+                self._show_empty_state("当前分组暂无素材", "切换分组或导入素材到当前分组后即可继续浏览。")
+            else:
+                self._show_empty_state("素材库为空", "导入参考图、风格样张或项目素材后即可开始检索。")
             return
 
         shown_count = self.show_search_results(images)
@@ -382,12 +461,19 @@ class ImageLibraryPanel(QWidget):
                  return
              total = self.image_db.get_image_count()
              self.status_label.setText(f"当前显示: {count} / 总计: {total}")
+             self._sync_summary_metrics(count, total)
+             self._set_summary(
+                 f"当前分组: {self.group_combo.currentText()} · 显示 {count} 张 · 总计 {total} 张"
+             )
          except Exception:
              self.status_label.setText(f"当前显示: {count}")
+             self._sync_summary_metrics(count)
+             self._set_summary(f"当前显示 {count} 张")
 
     def _clear_thumbnails(self):
         """清除所有缩略图"""
         self.selected_thumb = None
+        self.empty_state = None
         # self.rename_btn.setEnabled(False) # 移除
         for thumb in self._thumbnails:
             thumb.deleteLater()
@@ -405,6 +491,9 @@ class ImageLibraryPanel(QWidget):
 
         if not results:
             self.status_label.setText("未找到匹配的图片")
+            self._sync_summary_metrics(0)
+            self._set_summary("没有匹配结果")
+            self._show_empty_state("没有匹配结果", "尝试更换关键词，或导入更多素材后再搜索。")
             return 0
 
         # 计算每行显示的数量
@@ -447,8 +536,13 @@ class ImageLibraryPanel(QWidget):
             # thumb.data_name = name
         if displayed_count:
             self.status_label.setText(f"找到 {displayed_count} 张相似图片")
+            self._sync_summary_metrics(displayed_count)
+            self._set_summary(f"结果已更新 · 显示 {displayed_count} 张")
         else:
             self.status_label.setText("未找到可显示的图片")
+            self._sync_summary_metrics(0)
+            self._set_summary("结果中没有可显示的本地文件")
+            self._show_empty_state("没有可显示的素材", "结果中的文件可能已移动或被删除。")
 
         return displayed_count
 
@@ -462,6 +556,7 @@ class ImageLibraryPanel(QWidget):
 
         if not self.image_db:
             self.status_label.setText("图像库未初始化")
+            self._sync_summary_metrics(0)
             return
 
         try:
@@ -473,9 +568,90 @@ class ImageLibraryPanel(QWidget):
         if not results:
             self.status_label.setText(f"未找到匹配 \"{query}\" 的图片")
             self._clear_thumbnails()
+            self._sync_summary_metrics(0)
+            self._set_summary(f"没有匹配关键词: {query}")
+            self._show_empty_state("没有匹配结果", f"未找到与 \"{query}\" 相关的素材。")
             return
 
         self.show_search_results(results)
+
+    def _set_summary(self, text: str):
+        """更新素材库摘要。"""
+        if hasattr(self, "summary_label"):
+            self.summary_label.setText(text)
+
+    def _sync_summary_metrics(self, visible_count: int, total_count: Optional[int] = None):
+        """同步素材库顶部的关键状态指标。"""
+        if not hasattr(self, "total_value_label"):
+            return
+
+        if self.image_db is None:
+            self.total_value_label.setText("--")
+            self.visible_value_label.setText(f"{visible_count} 张")
+            self.group_value_label.setText("未连接")
+            self.library_state_badge.setText("未连接")
+            self.library_state_badge.setProperty("tone", "offline")
+        else:
+            total = total_count
+            if total is None:
+                try:
+                    total = self.image_db.get_image_count()
+                except Exception:
+                    total = None
+
+            self.total_value_label.setText(f"{total} 张" if total is not None else "--")
+            self.visible_value_label.setText(f"{visible_count} 张")
+            self.group_value_label.setText(self.group_combo.currentText() or "全部")
+            self.library_state_badge.setText("就绪")
+            self.library_state_badge.setProperty("tone", "ready")
+
+        self.library_state_badge.style().unpolish(self.library_state_badge)
+        self.library_state_badge.style().polish(self.library_state_badge)
+
+    def _show_empty_state(self, title: str, subtitle: str):
+        """在缩略图网格中显示空状态。"""
+        if self.empty_state is not None:
+            for index in range(self.thumbnail_layout.count()):
+                item = self.thumbnail_layout.itemAt(index)
+                if item and item.widget() is self.empty_state:
+                    self.thumbnail_layout.takeAt(index)
+                    break
+            self.empty_state.deleteLater()
+            self.empty_state = None
+
+        self.empty_state = QFrame()
+        self.empty_state.setObjectName("libraryEmptyState")
+        empty_layout = QVBoxLayout(self.empty_state)
+        empty_layout.setContentsMargins(24, 24, 24, 24)
+        empty_layout.setSpacing(10)
+
+        self.empty_title_label = QLabel(title)
+        self.empty_title_label.setObjectName("libraryEmptyTitle")
+        self.empty_title_label.setAlignment(Qt.AlignCenter)
+        empty_layout.addWidget(self.empty_title_label)
+
+        self.empty_subtitle_label = QLabel(subtitle)
+        self.empty_subtitle_label.setObjectName("libraryEmptySubtitle")
+        self.empty_subtitle_label.setAlignment(Qt.AlignCenter)
+        self.empty_subtitle_label.setWordWrap(True)
+        empty_layout.addWidget(self.empty_subtitle_label)
+
+        action_row = QHBoxLayout()
+        action_row.addStretch()
+        import_button = QPushButton("导入素材")
+        import_button.setProperty("variant", "primary")
+        import_button.setEnabled(self.image_db is not None)
+        import_button.clicked.connect(self._on_import_btn_clicked)
+        action_row.addWidget(import_button)
+        refresh_button = QPushButton("刷新")
+        refresh_button.setProperty("variant", "secondary")
+        refresh_button.setEnabled(self.image_db is not None)
+        refresh_button.clicked.connect(self.refresh)
+        action_row.addWidget(refresh_button)
+        action_row.addStretch()
+        empty_layout.addLayout(action_row)
+
+        self.thumbnail_layout.addWidget(self.empty_state, 0, 0, 1, 4)
 
     def _on_thumbnail_clicked(self, image_path: str):
         """缩略图点击"""

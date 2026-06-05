@@ -1,19 +1,24 @@
-# AI Image Processor (v1.1.0)
+# AI Image Processor (v1.2.0)
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 AI Image Processor is a desktop application for local AI-powered image workflows, including:
-- Natural-language color grading
-- Image library indexing and semantic retrieval
+- Natural-language color grading and reusable Look Presets
+- Image library indexing, semantic retrieval, and visual asset governance
 - Single-image and object-focused 3D generation
+- A modern PySide6 workbench with command center, canvas HUD, and command palette
 
 The project is designed for local/offline usage after model download, with a PySide6 GUI and modular AI backends.
 
 ## Key Features
 
 - Natural language color grading with rule-based parsing and optional local LLM analysis
+- Custom Look Presets for saving, applying, and managing repeatable grading styles
 - Local image library management with semantic + visual feature search
+- Product-grade asset workflows: library health summaries, picker metrics, empty states, and manager detail panels
+- Modern command center, workflow panel, and Ctrl+K command palette for fast navigation
+- Canvas HUD with asset metadata, drag/drop import, compare state, empty state, and processing overlay
 - 3D mesh and animation generation from images (depth + segmentation workflow)
 - Object selection with MobileSAM (point/box/path interactions)
 - Chinese-path-safe image I/O utilities
@@ -113,14 +118,19 @@ If `llm_config.json` is absent or disabled, the app falls back to non-LLM parsin
 
 ## Testing and Validation
 
-This repository currently has no formal automated test suite.
-
 Recommended validation commands:
 ```bash
 python -m compileall -q main.py src scripts
 python -m unittest discover -s tests
 python main.py --check-deps
 ```
+
+The v1.2.0 UI/product pass includes automated core and PySide6 UI regression tests. The current suite covers:
+- color panel reset and Look Preset behavior
+- image viewer HUD, processing overlay, and canvas state
+- command center and command palette state
+- image library, picker, and manager selection/empty/error states
+- AGI camera selection/export state regressions
 
 ## Build / Packaging Notes
 
@@ -135,6 +145,7 @@ python main.py --check-deps
 
 Additional docs are available under `docs/`, including:
 - LLM quickstart and configuration guides
+- v1.2.0 product UI upgrade notes
 - performance and optimization notes
 - code review notes from previous iterations
 

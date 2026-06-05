@@ -1,3 +1,13 @@
+## v1.2.0 - Product UI Platform Upgrade
+
+- Added a modern command center, canvas HUD, processing overlay, drag/drop import affordances, and Ctrl+K command palette.
+- Added a workflow panel for model readiness, asset context, next actions, and recent activity.
+- Added custom Look Preset persistence and color-panel actions for saving, applying, and deleting reusable grading styles.
+- Upgraded the image library, library manager, and image picker with summary metrics, clearer empty/error states, selection feedback, and consistent visual hierarchy.
+- Refreshed the global PySide6 dark theme, font fallback strategy, and component styling across the application.
+- Hardened AGI selection/export state handling and fixed selection overlay scaling regressions.
+- Expanded automated regression coverage to 54 tests across core logic and PySide6 UI workflows.
+
 ## v1.1.0 - Product Optimization Pass
 
 - Improved UI state handling so save, reset, undo, and compare actions match the current image context.
