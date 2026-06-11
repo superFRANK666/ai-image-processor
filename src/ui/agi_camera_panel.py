@@ -5,7 +5,7 @@ AGI相机面板
 """
 import logging
 import numpy as np
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -17,10 +17,11 @@ from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QEvent
 from PySide6.QtGui import QPixmap, QImage, QMouseEvent, QPainter, QColor, QPen
 import cv2
 
-# 使用相对导入
-from ..ai import Mesh3D
 from .ui_utils import WheelBlocker, fit_thumbnail_size, fit_within_size
 from .image_picker_dialog import pick_images
+
+if TYPE_CHECKING:
+    from ..ai import Mesh3D
 
 
 logger = logging.getLogger(__name__)
@@ -422,7 +423,7 @@ class AGICameraPanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self._mesh: Optional[Mesh3D] = None
+        self._mesh: Optional["Mesh3D"] = None
         self._frames: List[np.ndarray] = []
         self._wheel_blocker = WheelBlocker(self)
         self._has_selection = False
@@ -883,7 +884,7 @@ class AGICameraPanel(QWidget):
         if hasattr(self, '_pending_image') and self._pending_image is not None:
             self.image_view._update_display()
 
-    def set_mesh(self, mesh: Mesh3D):
+    def set_mesh(self, mesh: "Mesh3D"):
         """设置3D网格"""
         self._mesh = mesh
         # 显示一个静态预览 (使用简单投影)
@@ -893,7 +894,7 @@ class AGICameraPanel(QWidget):
             self.preview.set_frames([])
         self._update_export_actions()
 
-    def _show_mesh_preview(self, mesh: Mesh3D):
+    def _show_mesh_preview(self, mesh: "Mesh3D"):
         """显示网格预览"""
         # 简单的正交投影预览
         h, w = 300, 300
@@ -931,7 +932,7 @@ class AGICameraPanel(QWidget):
         """是否已有有效物体选择。"""
         return self._has_selection
 
-    def get_current_mesh(self) -> Optional[Mesh3D]:
+    def get_current_mesh(self) -> Optional["Mesh3D"]:
         """获取当前网格"""
         return self._mesh
 

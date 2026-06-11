@@ -104,6 +104,78 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(output.shape, image.shape)
         self.assertEqual(output.dtype, np.uint8)
 
+    def test_color_params_normalize_rich_llm_schema(self):
+        params = ColorGradingParams.from_dict({
+            "hsl": {
+                "blue": {"saturation": 28, "luminance": -8},
+                "orange": {"lum": 12},
+            },
+            "color_wheels": {
+                "shadows": {"hue": 195, "strength": 24},
+                "highlights": {"hue": 38, "saturation": 20},
+            },
+            "cdl": {
+                "slope": [1.05, 1.0, 0.96],
+                "offset": [0.01, 0.0, -0.01],
+                "power": [0.98, 1.0, 1.03],
+                "saturation": 0.92,
+            },
+        })
+
+        self.assertEqual(params.blue_saturation, 28)
+        self.assertEqual(params.blue_luminance, -8)
+        self.assertEqual(params.orange_luminance, 12)
+        self.assertEqual(params.shadow_hue, 195)
+        self.assertEqual(params.shadow_saturation, 24)
+        self.assertEqual(params.highlight_hue, 38)
+        self.assertEqual(params.highlight_saturation, 20)
+        self.assertEqual(params.cdl_slope, [1.05, 1.0, 0.96])
+        self.assertEqual(params.cdl_saturation, 0.92)
+
+    def test_color_grading_rich_parameters_output_contract(self):
+        image = np.zeros((16, 16, 3), dtype=np.uint8)
+        image[:, :8] = [190, 120, 40]
+        image[:, 8:] = [40, 130, 220]
+        params = ColorGradingParams(
+            exposure=0.1,
+            brightness=0.04,
+            gamma=1.08,
+            blue_saturation=30,
+            orange_luminance=12,
+            shadow_hue=195,
+            shadow_saturation=25,
+            highlight_hue=38,
+            highlight_saturation=20,
+            curve_darks=-12,
+            curve_lights=10,
+            texture=15,
+            bloom=10,
+            red_balance=6,
+            cdl_slope=[1.02, 1.0, 0.98],
+        )
+
+        output = ColorGradingEngine().apply_grading(image, params)
+
+        self.assertEqual(output.shape, image.shape)
+        self.assertEqual(output.dtype, np.uint8)
+
+    def test_traditional_parser_maps_semantics_to_rich_controls(self):
+        from src.ai.nlp_color_parser import NLPColorParser
+
+        parser = object.__new__(NLPColorParser)
+        parser.text_encoder = None
+        parser.use_llm = False
+        parser.llm_analyzer = None
+
+        sky = parser._traditional_parse("让天空更蓝更通透但肤色别太红", "让天空更蓝更通透但肤色别太红")
+        cinematic = parser._traditional_parse("青橙电影感暗部冷高光暖", "青橙电影感暗部冷高光暖")
+
+        self.assertGreater(sky.blue_saturation, 0)
+        self.assertGreater(sky.dehaze, 0)
+        self.assertLess(sky.red_saturation, 0)
+        self.assertGreater(cinematic.shadow_saturation, 0)
+        self.assertGreater(cinematic.highlight_saturation, 0)
+
     def test_grid_mesh_shape_and_first_faces(self):
         faces = GeometryUtils.create_grid_mesh(4, 3)
 

@@ -201,6 +201,7 @@ class ImageViewer(QWidget):
     open_requested = Signal()
     import_requested = Signal()
     image_dropped = Signal(str)
+    compare_toggled = Signal(bool)
 
     def __init__(self):
         super().__init__()
@@ -353,9 +354,9 @@ class ImageViewer(QWidget):
         font.setPointSize(14)
         font.setBold(True)
 
-        self.zoom_out_btn = QPushButton("-")
+        self.zoom_out_btn = QPushButton("－")
         self.zoom_out_btn.setFont(font)
-        self.zoom_out_btn.setFixedSize(30, 30)
+        self.zoom_out_btn.setMinimumSize(32, 32)
         self.zoom_out_btn.setToolTip("缩小")
         # 微调样式以确保符号居中
         self.zoom_out_btn.setProperty("variant", "secondary")
@@ -370,9 +371,9 @@ class ImageViewer(QWidget):
         self.zoom_slider.installEventFilter(self._wheel_blocker)
         toolbar_layout.addWidget(self.zoom_slider)
 
-        self.zoom_in_btn = QPushButton("+")
+        self.zoom_in_btn = QPushButton("＋")
         self.zoom_in_btn.setFont(font)
-        self.zoom_in_btn.setFixedSize(30, 30)
+        self.zoom_in_btn.setMinimumSize(32, 32)
         self.zoom_in_btn.setToolTip("放大")
         self.zoom_in_btn.setProperty("variant", "secondary")
         self.zoom_in_btn.clicked.connect(self.zoom_in)
@@ -396,6 +397,13 @@ class ImageViewer(QWidget):
         self.actual_btn.setProperty("variant", "secondary")
         self.actual_btn.clicked.connect(self.actual_size)
         toolbar_layout.addWidget(self.actual_btn)
+
+        # 对比按钮
+        self.compare_btn = QPushButton("对比")
+        self.compare_btn.setProperty("variant", "secondary")
+        self.compare_btn.setCheckable(True)
+        self.compare_btn.toggled.connect(self.compare_toggled.emit)
+        toolbar_layout.addWidget(self.compare_btn)
 
         layout.addWidget(toolbar)
 
@@ -510,6 +518,7 @@ class ImageViewer(QWidget):
             self.zoom_in_btn,
             self.fit_btn,
             self.actual_btn,
+            self.compare_btn,
         ):
             control.setEnabled(self._has_image)
 

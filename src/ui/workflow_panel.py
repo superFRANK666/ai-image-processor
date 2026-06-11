@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QWidget,
+    QScrollArea,
 )
 
 
@@ -76,7 +77,15 @@ class WorkflowPanel(QWidget):
         self.update_metrics(self._metrics)
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
@@ -93,12 +102,16 @@ class WorkflowPanel(QWidget):
         session_layout = QGridLayout(self.session_group)
         session_layout.setHorizontalSpacing(10)
         session_layout.setVerticalSpacing(8)
+        # 设置列宽描: 第0列（标题）固定宽度，第1列（数值）自动拉伸
+        session_layout.setColumnStretch(0, 0)
+        session_layout.setColumnStretch(1, 1)
         self.file_value = QLabel("未加载素材")
         self.file_value.setWordWrap(True)
         self.size_value = QLabel("-")
         self.history_value = QLabel("0 步")
         self.library_value = QLabel("图像库加载中")
         self.asset_value = QLabel("无生成产物")
+        self.asset_value.setWordWrap(True)
         self._add_metric_row(session_layout, 0, "文件", self.file_value)
         self._add_metric_row(session_layout, 1, "尺寸", self.size_value)
         self._add_metric_row(session_layout, 2, "历史", self.history_value)
@@ -163,11 +176,17 @@ class WorkflowPanel(QWidget):
 
         layout.addStretch()
 
+        scroll_area.setWidget(container)
+        main_layout.addWidget(scroll_area)
+
     def _add_metric_row(self, layout: QGridLayout, row: int, name: str, value: QLabel):
         name_label = QLabel(name)
         name_label.setObjectName("workflowMetricName")
+        # 标题列固定宽度，避免展宽压捨数值区域
+        name_label.setFixedWidth(36)
         value.setObjectName("workflowMetricValue")
-        layout.addWidget(name_label, row, 0)
+        value.setMinimumWidth(0)
+        layout.addWidget(name_label, row, 0, Qt.AlignTop)
         layout.addWidget(value, row, 1)
 
     def _make_action_button(self, text: str, callback, variant: str = "secondary") -> QPushButton:

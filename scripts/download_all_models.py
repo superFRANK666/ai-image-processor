@@ -3,19 +3,22 @@
 """
 统一模型下载脚本 - 完整版（包含所有必需模型）
 支持的模型：
-1. NLP理解模型 (paraphrase-multilingual-MiniLM-L12-v2)
-2. 深度估计模型 (depth-anything-small)
-3. MobileSAM 分割模型
-4. CLIP 多语言图像检索模型
-5. Qwen 大语言模型 (可选)
+1. 一句话调色大语言模型 (默认 Qwen2.5-1.5B-Instruct，可自定义)
+2. NLP理解模型 (paraphrase-multilingual-MiniLM-L12-v2)
+3. 深度估计模型 (depth-anything-small)
+4. MobileSAM 分割模型
+5. CLIP 多语言图像检索模型
 6. SAM2 高精度分割模型 (可选)
 """
 import os
 import sys
+import json
 import hashlib
+import re
 import shutil
 import zipfile
 from pathlib import Path
+from typing import Optional
 
 # 修复Windows控制台编码
 if sys.platform == 'win32':
@@ -30,8 +33,15 @@ if 'HF_ENDPOINT' not in os.environ:
 PROJECT_ROOT = Path(__file__).parent.parent  # 项目根目录
 MODELS_DIR = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(exist_ok=True)
+LLM_CONFIG_PATH = PROJECT_ROOT / "llm_config.json"
 
 MOBILE_SAM_SHA256 = "f3c0d8cda613564d499310dab6c812cd80d9de20dd0e7d7b3ea0cd86ff5c76d6"
+DEFAULT_LLM_REPO_ID = "Qwen/Qwen2.5-1.5B-Instruct"
+DEFAULT_LLM_DIR_NAME = "Qwen2.5-1.5B-Instruct"
+KNOWN_LLM_MODEL_ALIASES = {
+    "qwen2.5-1.5b-instruct": DEFAULT_LLM_REPO_ID,
+    "qwen/qwen2.5-1.5b-instruct": DEFAULT_LLM_REPO_ID,
+}
 
 
 def calculate_sha256(file_path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -100,15 +110,268 @@ def safe_extract_zip(zip_path: Path, target_dir: Path):
                 raise ValueError(f"ZIP 包含非法路径: {member.filename}")
         zip_ref.extractall(target_root)
 
+
+def prompt_input(prompt: str, default: str = "") -> str:
+    """读取交互输入；在非交互环境中返回默认值。"""
+    try:
+        return input(prompt)
+    except EOFError:
+        print()
+        return default
+
+
+def model_id_from_hf_item(item) -> Optional[str]:
+    """兼容 huggingface_hub 不同版本的模型条目字段。"""
+    return getattr(item, "modelId", None) or getattr(item, "id", None)
+
+
+def sanitize_model_dir_name(model_id: str) -> str:
+    """将模型 ID 转换为安全的本地目录名。"""
+    if model_id == DEFAULT_LLM_REPO_ID:
+        return DEFAULT_LLM_DIR_NAME
+
+    normalized = model_id.strip().replace("\\", "/")
+    safe_name = normalized.replace("/", "__")
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", safe_name).strip("._-")
+    return safe_name or "custom-llm-model"
+
+
+def config_model_path(local_dir: Path) -> str:
+    """生成写入 llm_config.json 的模型路径。"""
+    try:
+        relative = local_dir.resolve().relative_to(PROJECT_ROOT.resolve())
+        return f"./{relative.as_posix()}"
+    except ValueError:
+        return str(local_dir.resolve())
+
+
+def write_llm_config(local_dir: Path):
+    """写入一句话调色使用的 LLM 配置。"""
+    config = {
+        "enabled": True,
+        "model_name": config_model_path(local_dir),
+        "device": "auto",
+        "trust_remote_code": False,
+    }
+    LLM_CONFIG_PATH.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"  ✓ 已写入配置: {LLM_CONFIG_PATH}")
+    print(f"  ✓ 一句话调色模型路径: {config['model_name']}")
+
+
+def huggingface_endpoints():
+    """返回用于查找和下载模型的 HuggingFace 端点列表。"""
+    endpoints = []
+    env_endpoint = os.environ.get("HF_ENDPOINT")
+    if env_endpoint:
+        endpoints.append(env_endpoint.rstrip("/"))
+    endpoints.append("https://huggingface.co")
+
+    unique = []
+    for endpoint in endpoints:
+        if endpoint not in unique:
+            unique.append(endpoint)
+    return unique
+
+
+def choose_best_model_id(model_ids, query: str) -> Optional[str]:
+    """从搜索结果中选择最匹配的模型 ID。"""
+    if not model_ids:
+        return None
+
+    normalized_query = query.casefold().strip()
+    for model_id in model_ids:
+        if model_id.casefold() == normalized_query:
+            return model_id
+
+    for model_id in model_ids:
+        short_name = model_id.rsplit("/", 1)[-1]
+        if short_name.casefold() == normalized_query:
+            return model_id
+
+    return model_ids[0]
+
+
+def resolve_known_llm_alias(query: str) -> Optional[str]:
+    """解析内置常见模型短名。"""
+    return KNOWN_LLM_MODEL_ALIASES.get(query.casefold().strip())
+
+
+def find_huggingface_model(query: str) -> Optional[str]:
+    """按用户输入查找 HuggingFace 模型。"""
+    from huggingface_hub import HfApi
+
+    normalized_query = query.strip()
+    if not normalized_query:
+        return None
+
+    known_model = resolve_known_llm_alias(normalized_query)
+    if known_model:
+        print(f"  ✓ 找到模型: {known_model}")
+        return known_model
+
+    last_error = None
+    for endpoint in huggingface_endpoints():
+        api = HfApi(endpoint=endpoint)
+
+        exact_candidates = [normalized_query]
+        if "/" not in normalized_query and normalized_query.casefold().startswith("qwen"):
+            exact_candidates.insert(0, f"Qwen/{normalized_query}")
+
+        for candidate in exact_candidates:
+            if "/" not in candidate:
+                continue
+            try:
+                info = api.model_info(candidate)
+                found = model_id_from_hf_item(info) or candidate
+                print(f"  ✓ 找到模型: {found}")
+                return found
+            except Exception as exc:
+                last_error = exc
+
+        try:
+            try:
+                results = list(
+                    api.list_models(
+                        search=normalized_query,
+                        sort="downloads",
+                        direction=-1,
+                        limit=10,
+                    )
+                )
+            except TypeError:
+                results = list(api.list_models(search=normalized_query, limit=10))
+        except Exception as exc:
+            last_error = exc
+            continue
+
+        model_ids = [model_id_from_hf_item(item) for item in results]
+        model_ids = [model_id for model_id in model_ids if model_id]
+        selected_model = choose_best_model_id(model_ids, normalized_query)
+        if selected_model:
+            print(f"  ✓ 找到模型: {selected_model}")
+            return selected_model
+
+    if last_error:
+        print(f"  ⚠ 模型搜索失败或无结果: {last_error}")
+    return None
+
+
+def print_manual_llm_download_help(requested_model: str, target_dir: Path, not_found: bool = True):
+    """提示用户手动下载未能自动找到的模型。"""
+    if not_found:
+        print(f"  ✗ 未找到模型: {requested_model}")
+        print("  请确认模型名称是否为 HuggingFace 仓库 ID，例如: Qwen/Qwen2.5-1.5B-Instruct")
+    else:
+        print(f"  ✗ 无法自动下载模型: {requested_model}")
+        print("  请检查网络、磁盘空间，或稍后重试。")
+    print("  如需手动下载，请将完整模型仓库文件保存到:")
+    print(f"    {target_dir}")
+    print("  手动下载示例:")
+    print(
+        "    python -c \"from huggingface_hub import snapshot_download; "
+        f"snapshot_download(repo_id='模型ID', local_dir=r'{target_dir}', "
+        "local_dir_use_symlinks=False)\""
+    )
+    print("  下载完成后，可将 llm_config.json 设置为:")
+    manual_config = {
+        "enabled": True,
+        "model_name": config_model_path(target_dir),
+        "device": "auto",
+        "trust_remote_code": False,
+    }
+    print(json.dumps(manual_config, ensure_ascii=False, indent=4))
+
+
+def llm_snapshot_ready(model_dir: Path) -> bool:
+    """判断本地大语言模型目录是否已包含可加载的基础文件。"""
+    if not model_dir.exists() or not model_dir.is_dir():
+        return False
+
+    has_config = (model_dir / "config.json").exists()
+    has_tokenizer = any(
+        (model_dir / name).exists()
+        for name in ("tokenizer.json", "tokenizer.model", "tokenizer_config.json")
+    )
+    has_weights = any(model_dir.glob("*.safetensors")) or any(model_dir.glob("*.bin"))
+    return has_config and has_tokenizer and has_weights
+
+
+def download_llm_snapshot(model_id: str, save_path: Path):
+    """下载大语言模型仓库到本地目录。"""
+    from huggingface_hub import snapshot_download
+
+    if llm_snapshot_ready(save_path):
+        print(f"  ✓ 模型目录已存在,跳过下载: {save_path}")
+        return
+    if save_path.exists() and any(save_path.iterdir()):
+        print("  ⚠ 检测到未完整的模型目录，将尝试断点续传")
+
+    save_path.mkdir(parents=True, exist_ok=True)
+    print(f"  正在下载模型仓库: {model_id}")
+    print(f"  保存位置: {save_path}")
+    snapshot_download(
+        repo_id=model_id,
+        local_dir=str(save_path),
+        local_dir_use_symlinks=False,
+        resume_download=True,
+        max_workers=4,
+    )
+    print(f"  ✓ 下载完成: {save_path}")
+
+
+def configure_llm_model() -> bool:
+    """在其它模型下载前配置一句话调色大语言模型。"""
+    print("\n" + "=" * 80)
+    print("[1/6] 配置一句话调色大语言模型")
+    print("=" * 80)
+    print("一句话调色需要一个本地大语言模型来理解自然语言调色意图。")
+    print("请选择要下载和配置的模型:")
+    print(f"  1. {DEFAULT_LLM_REPO_ID} (默认推荐, 约3GB)")
+    print("  2. Others (自行填写 HuggingFace 模型名称)")
+
+    choice = prompt_input("请选择 (1/2, 默认1): ", default="1").strip()
+    if choice in ("", "1"):
+        model_id = DEFAULT_LLM_REPO_ID
+        local_dir = MODELS_DIR / DEFAULT_LLM_DIR_NAME
+    elif choice == "2":
+        requested_model = prompt_input("请输入模型名称或 HuggingFace 仓库ID: ").strip()
+        if not requested_model:
+            print("  ✗ 未输入模型名称，跳过 LLM 配置")
+            return False
+
+        print(f"  正在查找模型: {requested_model}")
+        model_id = find_huggingface_model(requested_model)
+        local_dir = MODELS_DIR / sanitize_model_dir_name(model_id or requested_model)
+        if not model_id:
+            print_manual_llm_download_help(requested_model, local_dir)
+            return False
+    else:
+        print("  输入无效，使用默认模型")
+        model_id = DEFAULT_LLM_REPO_ID
+        local_dir = MODELS_DIR / DEFAULT_LLM_DIR_NAME
+
+    try:
+        download_llm_snapshot(model_id, local_dir)
+        write_llm_config(local_dir)
+        return True
+    except Exception as e:
+        print(f"  ✗ 大语言模型下载或配置失败: {e}")
+        print_manual_llm_download_help(model_id, local_dir, not_found=False)
+        return False
+
+
 print("=" * 80)
 print("   AI影像处理软件 - 完整模型下载工具")
 print("=" * 80)
 print("\n📦 将下载以下模型:")
-print("  [必需] 1. NLP理解模型 (~471MB)")
-print("  [必需] 2. 深度估计模型 (~99MB)")
-print("  [必需] 3. MobileSAM分割模型 (~40MB)")
-print("  [必需] 4. CLIP多语言模型 (~540MB)")
-print("  [可选] 5. Qwen大语言模型 (~3GB)")
+print("  [建议] 1. 一句话调色大语言模型 (默认Qwen2.5-1.5B, ~3GB)")
+print("  [必需] 2. NLP理解模型 (~471MB)")
+print("  [必需] 3. 深度估计模型 (~99MB)")
+print("  [必需] 4. MobileSAM分割模型 (~40MB)")
+print("  [必需] 5. CLIP多语言模型 (~540MB)")
 print("  [可选] 6. SAM2高精度分割 (~155MB)")
 print("\n⏱️  预计总下载时间: 10-30分钟 (取决于网络速度)")
 print("=" * 80)
@@ -118,9 +381,14 @@ total_models = 6
 downloaded_models = 0
 failed_models = []
 
-# 1. 下载NLP理解模型
+if configure_llm_model():
+    downloaded_models += 1
+else:
+    failed_models.append(("一句话调色大语言模型", "未完成自动下载或配置"))
+
+# 2. 下载NLP理解模型
 print("\n" + "=" * 80)
-print("[1/6] 下载NLP理解模型 (约471MB)...")
+print("[2/6] 下载NLP理解模型 (约471MB)...")
 print("=" * 80)
 try:
     from sentence_transformers import SentenceTransformer
@@ -138,9 +406,9 @@ except Exception as e:
     print(f"  ✗ 下载失败: {e}")
     failed_models.append(("NLP理解模型", str(e)))
 
-# 2. 下载深度估计模型
+# 3. 下载深度估计模型
 print("\n" + "=" * 80)
-print("[2/6] 下载深度估计模型 (约99MB)...")
+print("[3/6] 下载深度估计模型 (约99MB)...")
 print("=" * 80)
 try:
     from transformers import AutoImageProcessor, AutoModelForDepthEstimation
@@ -160,9 +428,9 @@ except Exception as e:
     print(f"  ✗ 下载失败: {e}")
     failed_models.append(("深度估计模型", str(e)))
 
-# 3. 下载MobileSAM权重
+# 4. 下载MobileSAM权重
 print("\n" + "=" * 80)
-print("[3/6] 下载MobileSAM权重 (约40MB)...")
+print("[4/6] 下载MobileSAM权重 (约40MB)...")
 print("=" * 80)
 try:
     import requests
@@ -263,9 +531,9 @@ try:
 except Exception as e:
     print(f"  ✗ 安装失败: {e}")
 
-# 4. 下载多语言CLIP模型
+# 5. 下载多语言CLIP模型
 print("\n" + "=" * 80)
-print("[4/6] 下载多语言CLIP模型 (约540MB)...")
+print("[5/6] 下载多语言CLIP模型 (约540MB)...")
 print("=" * 80)
 try:
     from sentence_transformers import SentenceTransformer
@@ -283,49 +551,12 @@ except Exception as e:
     print(f"  ✗ 下载失败: {e}")
     failed_models.append(("CLIP多语言模型", str(e)))
 
-# 5. 下载Qwen大语言模型 (可选)
-print("\n" + "=" * 80)
-print("[5/6] 下载Qwen2.5-1.5B-Instruct大语言模型 (约3GB, 可选)...")
-print("=" * 80)
-print("提示: 此模型较大且为可选项，如不需要AI语义分析可跳过")
-user_input = input("是否下载? (y/n, 默认n): ").strip().lower()
-
-if user_input == 'y':
-    try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        model_name = "Qwen/Qwen2.5-1.5B-Instruct"
-        save_path = MODELS_DIR / "Qwen2.5-1.5B-Instruct"
-        if save_path.exists():
-            print("  ✓ 模型已存在,跳过")
-            downloaded_models += 1
-        else:
-            print("  正在下载分词器...")
-            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=False)
-            tokenizer.save_pretrained(str(save_path))
-
-            print("  正在下载模型权重 (约3GB,可能需要较长时间)...")
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype="auto",
-                device_map="cpu",
-                trust_remote_code=False
-            )
-            model.save_pretrained(str(save_path))
-            print(f"  ✓ 下载完成: {save_path}")
-            downloaded_models += 1
-    except Exception as e:
-        print(f"  ✗ 下载失败: {e}")
-        print("  提示: 如果网络问题导致失败,可以稍后重试")
-        failed_models.append(("Qwen大语言模型", str(e)))
-else:
-    print("  ⊘ 跳过 Qwen模型下载")
-
 # 6. 下载SAM2高精度分割模型 (可选)
 print("\n" + "=" * 80)
 print("[6/6] 下载SAM2高精度分割模型 (约155MB, 可选)...")
 print("=" * 80)
 print("提示: SAM2精度比MobileSAM高15-20%，但速度略慢")
-user_input = input("是否下载? (y/n, 默认y): ").strip().lower()
+user_input = prompt_input("是否下载? (y/n, 默认y): ").strip().lower()
 
 if user_input != 'n':
     try:
@@ -386,6 +617,6 @@ print("\n📁 模型目录: ", MODELS_DIR)
 print("\n接下来:")
 print("  1. 确认 models 目录下的模型文件")
 print("  2. 运行 python main.py 启动程序")
-print("  3. 大语言模型(Qwen)需在 llm_config.json 中启用")
+print("  3. 一句话调色大语言模型配置位于 llm_config.json")
 print("  4. 使用 src/utils/model_checksum.py 验证模型完整性")
 print("\n" + "=" * 80)

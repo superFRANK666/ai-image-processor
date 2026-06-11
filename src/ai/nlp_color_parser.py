@@ -4,74 +4,10 @@
 """
 import re
 from typing import Dict, Any, Optional, Tuple, List, Callable
-from dataclasses import dataclass, field
 import numpy as np
 
-
-@dataclass
-class ColorGradingParams:
-    """调色参数数据类"""
-    # 基础调整
-    exposure: float = 0.0          # 曝光 [-2, 2]
-    contrast: float = 1.0          # 对比度 [0.5, 2]
-    highlights: float = 0.0        # 高光 [-100, 100]
-    shadows: float = 0.0           # 阴影 [-100, 100]
-    whites: float = 0.0            # 白色 [-100, 100]
-    blacks: float = 0.0            # 黑色 [-100, 100]
-
-    # 颜色调整
-    temperature: float = 0.0       # 色温 [-100, 100] 负值偏蓝,正值偏黄
-    tint: float = 0.0              # 色调 [-100, 100] 负值偏绿,正值偏品红
-    vibrance: float = 0.0          # 自然饱和度 [-100, 100]
-    saturation: float = 1.0        # 饱和度 [0, 2]
-
-    # HSL调整
-    hue_shift: float = 0.0         # 色相偏移 [-180, 180]
-
-    # 分离色调
-    split_tone_shadows: List[int] = field(default_factory=lambda: [0, 0, 0])
-    split_tone_highlights: List[int] = field(default_factory=lambda: [255, 255, 255])
-    split_tone_balance: float = 0.0  # [-100, 100]
-
-    # 效果
-    clarity: float = 0.0           # 清晰度 [-100, 100]
-    dehaze: float = 0.0            # 去雾 [-100, 100]
-    vignette: float = 0.0          # 暗角 [0, 100]
-    grain: float = 0.0             # 颗粒 [0, 100]
-    fade: float = 0.0              # 褪色 [0, 1]
-
-    # 曲线 (可选的自定义曲线点)
-    tone_curve: Optional[List[Tuple[int, int]]] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
-        return {
-            'exposure': self.exposure,
-            'contrast': self.contrast,
-            'highlights': self.highlights,
-            'shadows': self.shadows,
-            'whites': self.whites,
-            'blacks': self.blacks,
-            'temperature': self.temperature,
-            'tint': self.tint,
-            'vibrance': self.vibrance,
-            'saturation': self.saturation,
-            'hue_shift': self.hue_shift,
-            'split_tone_shadows': self.split_tone_shadows,
-            'split_tone_highlights': self.split_tone_highlights,
-            'split_tone_balance': self.split_tone_balance,
-            'clarity': self.clarity,
-            'dehaze': self.dehaze,
-            'vignette': self.vignette,
-            'grain': self.grain,
-            'fade': self.fade,
-            'tone_curve': self.tone_curve
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'ColorGradingParams':
-        """从字典创建"""
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+# ColorGradingParams 定义在独立的轻量模块中，UI 面板导入本模块时不触发 numpy 加载
+from .color_params import ColorGradingParams  # noqa: F401 (re-export)
 
 
 class NLPColorParser:
@@ -107,6 +43,47 @@ class NLPColorParser:
         '赛博朋克': {'contrast': 1.4, 'saturation': 1.3, 'vibrance': 30},
         'ins风': {'contrast': 1.1, 'saturation': 0.85, 'fade': 0.08},
         '港风': {'contrast': 1.2, 'saturation': 1.1, 'grain': 10},
+        '青橙': {
+            'contrast': 1.22, 'saturation': 0.9, 'curve_shadows': -10,
+            'shadow_hue': 195, 'shadow_saturation': 26,
+            'highlight_hue': 38, 'highlight_saturation': 22,
+        },
+        'teal orange': {
+            'contrast': 1.22, 'saturation': 0.9,
+            'shadow_hue': 195, 'shadow_saturation': 26,
+            'highlight_hue': 38, 'highlight_saturation': 22,
+        },
+        '大片': {'contrast': 1.25, 'curve_darks': -10, 'curve_lights': 10, 'vignette': 10},
+        '低调': {'exposure': -0.2, 'gamma': 0.82, 'contrast': 1.2, 'blacks': -15, 'vignette': 18},
+        '高调': {'exposure': 0.28, 'gamma': 1.15, 'contrast': 0.9, 'shadows': 15},
+        '暗黑': {'exposure': -0.35, 'gamma': 0.78, 'contrast': 1.28, 'blacks': -22, 'vignette': 25},
+        '莫兰迪': {'saturation': 0.68, 'contrast': 0.95, 'fade': 0.12, 'curve_shadows': 8},
+        '马卡龙': {'exposure': 0.18, 'contrast': 0.88, 'saturation': 0.78, 'vibrance': 12, 'curve_shadows': 10},
+        '奶油': {'exposure': 0.16, 'contrast': 0.86, 'temperature': 8, 'texture': -18, 'bloom': 8},
+        '奶油肌': {'orange_luminance': 12, 'red_saturation': -10, 'texture': -25, 'noise_reduction': 18},
+        '宝丽来': {'contrast': 1.08, 'saturation': 0.82, 'fade': 0.22, 'grain': 24, 'curve_shadows': 14},
+        'kodak': {'temperature': 12, 'contrast': 1.12, 'orange_saturation': 12, 'blue_saturation': -8, 'grain': 18},
+        '富士': {'temperature': -4, 'tint': -6, 'green_saturation': 12, 'red_saturation': -8, 'grain': 12},
+        'fujifilm': {'temperature': -4, 'tint': -6, 'green_saturation': 12, 'red_saturation': -8, 'grain': 12},
+        '宝莱坞': {'contrast': 1.18, 'saturation': 1.22, 'vibrance': 26, 'temperature': 12},
+        '黑白': {'saturation': 0.0, 'contrast': 1.2, 'curve_darks': -8, 'curve_lights': 8},
+        '单色': {'saturation': 0.18, 'contrast': 1.12},
+        '银盐': {'saturation': 0.0, 'contrast': 1.28, 'grain': 28, 'curve_shadows': 10},
+        '霓虹': {
+            'contrast': 1.28, 'saturation': 1.24, 'vibrance': 35, 'bloom': 22,
+            'shadow_hue': 245, 'shadow_saturation': 22,
+            'highlight_hue': 305, 'highlight_saturation': 26,
+        },
+        '蒸汽波': {
+            'contrast': 1.08, 'saturation': 1.28, 'bloom': 18,
+            'shadow_hue': 220, 'shadow_saturation': 18,
+            'highlight_hue': 315, 'highlight_saturation': 28,
+        },
+        'vaporwave': {
+            'contrast': 1.08, 'saturation': 1.28, 'bloom': 18,
+            'shadow_hue': 220, 'shadow_saturation': 18,
+            'highlight_hue': 315, 'highlight_saturation': 28,
+        },
 
         # 场景关键词
         '海边': {'temperature': -15, 'saturation': 1.1, 'vibrance': 15, 'dehaze': 10},
@@ -119,6 +96,29 @@ class NLPColorParser:
         '雪景': {'temperature': -10, 'exposure': 0.15, 'contrast': 1.1},
         '秋天': {'temperature': 20, 'saturation': 1.2, 'vibrance': 15},
         '春天': {'saturation': 1.1, 'vibrance': 20, 'clarity': 10},
+        '蓝天': {'blue_saturation': 28, 'blue_luminance': -6, 'aqua_saturation': 14, 'dehaze': 12},
+        '天空': {'blue_saturation': 22, 'blue_luminance': -4, 'aqua_saturation': 10, 'dehaze': 10},
+        '云': {'highlights': 8, 'whites': 10, 'dehaze': 8},
+        '草地': {'green_saturation': 24, 'green_luminance': -4, 'yellow_saturation': -8},
+        '树叶': {'green_saturation': 18, 'green_hue': -6, 'yellow_saturation': -6},
+        '肤色': {'orange_luminance': 10, 'orange_saturation': 6, 'red_saturation': -8, 'texture': -10},
+        '人像': {'orange_luminance': 8, 'red_saturation': -8, 'texture': -12, 'clarity': -6},
+        '黄金时刻': {
+            'temperature': 22, 'highlight_hue': 40, 'highlight_saturation': 25,
+            'orange_saturation': 14, 'yellow_luminance': 8,
+        },
+        '金色时刻': {
+            'temperature': 22, 'highlight_hue': 40, 'highlight_saturation': 25,
+            'orange_saturation': 14, 'yellow_luminance': 8,
+        },
+        '蓝调时刻': {
+            'temperature': -22, 'gamma': 0.9, 'blue_saturation': 18,
+            'shadow_hue': 218, 'shadow_saturation': 18,
+        },
+        '雨天': {'temperature': -12, 'contrast': 0.95, 'dehaze': -8, 'blue_saturation': 10},
+        '雾': {'dehaze': -25, 'contrast': 0.86, 'bloom': 10, 'fade': 0.08},
+        '沙漠': {'temperature': 24, 'yellow_saturation': 18, 'orange_saturation': 10, 'dehaze': 10},
+        '雪': {'temperature': -12, 'exposure': 0.18, 'whites': 12, 'blue_saturation': -8},
 
         # 情绪关键词
         '明亮': {'exposure': 0.2, 'highlights': 15},
@@ -129,6 +129,14 @@ class NLPColorParser:
         '通透': {'dehaze': 25, 'clarity': 20, 'vibrance': 10},
         '高级感': {'contrast': 1.1, 'saturation': 0.85, 'clarity': 15},
         '质感': {'clarity': 25, 'contrast': 1.1},
+        '干净': {'noise_reduction': 15, 'dehaze': 12, 'grain': 0, 'texture': -4},
+        '油润': {'contrast': 1.05, 'curve_shadows': 8, 'curve_lights': 6, 'texture': -6},
+        '空气感': {'exposure': 0.18, 'contrast': 0.88, 'shadows': 15, 'dehaze': -5, 'bloom': 8},
+        '朦胧感': {'clarity': -18, 'texture': -14, 'dehaze': -18, 'bloom': 16},
+        '柔焦': {'clarity': -22, 'texture': -20, 'bloom': 18},
+        '硬朗': {'contrast': 1.22, 'clarity': 28, 'midtone_detail': 20, 'texture': 12},
+        '厚重': {'contrast': 1.18, 'gamma': 0.9, 'curve_darks': -12, 'saturation': 0.9},
+        '轻盈': {'exposure': 0.16, 'contrast': 0.9, 'curve_shadows': 12, 'saturation': 0.86},
     }
 
     # 程度修饰词
@@ -164,6 +172,10 @@ class NLPColorParser:
     PARAM_KEYWORDS = {
         '曝光': 'exposure',
         '亮度': 'exposure',
+        '明度': 'brightness',
+        '中间调亮度': 'gamma',
+        'gamma': 'gamma',
+        '伽马': 'gamma',
         '对比度': 'contrast',
         '对比': 'contrast',
         '饱和度': 'saturation',
@@ -172,7 +184,18 @@ class NLPColorParser:
         '色调': 'tint',
         '清晰度': 'clarity',
         '锐度': 'clarity',
+        '纹理': 'texture',
+        '细节': 'midtone_detail',
+        '中间调细节': 'midtone_detail',
+        '锐化': 'sharpen',
+        '降噪': 'noise_reduction',
+        '噪声': 'noise_reduction',
         '去雾': 'dehaze',
+        '雾感': 'dehaze',
+        '柔光': 'bloom',
+        '泛光': 'bloom',
+        '光晕': 'bloom',
+        '发光': 'bloom',
         '暗角': 'vignette',
         '颗粒': 'grain',
         '噪点': 'grain',
@@ -182,6 +205,18 @@ class NLPColorParser:
         '黑色': 'blacks',
         '自然饱和度': 'vibrance',
         '鲜艳度': 'vibrance',
+        '曲线阴影': 'curve_shadows',
+        '暗调': 'curve_darks',
+        '亮调': 'curve_lights',
+        '曲线高光': 'curve_highlights',
+        '红色': 'red_saturation',
+        '橙色': 'orange_saturation',
+        '黄色': 'yellow_saturation',
+        '绿色': 'green_saturation',
+        '青色': 'aqua_saturation',
+        '蓝色': 'blue_saturation',
+        '紫色': 'purple_saturation',
+        '品红': 'magenta_saturation',
     }
 
     def __init__(self, use_llm: bool = True, llm_config: Optional[Dict[str, Any]] = None):
@@ -314,6 +349,10 @@ class NLPColorParser:
         adjustment_params = self._parse_adjustments(text_lower)
         params = self._merge_params(params, adjustment_params)
 
+        # 解析主体/颜色语义，例如天空、肤色、草地、霓虹等
+        semantic_color_params = self._parse_semantic_color_controls(text_lower)
+        params = self._merge_params(params, semantic_color_params)
+
         # 应用程度修饰
         params = self._apply_intensity_modifiers(text_lower, params)
 
@@ -419,6 +458,10 @@ class NLPColorParser:
         adjustment_params = self._parse_adjustments(text_lower)
         params = self._merge_params(params, adjustment_params)
 
+        # 解析主体/颜色语义
+        semantic_color_params = self._parse_semantic_color_controls(text_lower)
+        params = self._merge_params(params, semantic_color_params)
+
         # 应用程度修饰
         params = self._apply_intensity_modifiers(text_lower, params)
 
@@ -432,60 +475,65 @@ class NLPColorParser:
     def _format_params(self, params: ColorGradingParams) -> str:
         """格式化参数用于日志输出"""
         return (f"曝光={params.exposure:.2f}, 对比度={params.contrast:.2f}, "
-                f"色温={params.temperature:.0f}, 饱和度={params.saturation:.2f}")
-    
+                f"Gamma={params.gamma:.2f}, 色温={params.temperature:.0f}, "
+                f"饱和度={params.saturation:.2f}, 蓝HSL={params.blue_saturation:.0f}, "
+                f"阴影色轮={params.shadow_saturation:.0f}")
+
     def _is_default_params(self, params: ColorGradingParams) -> bool:
         """检查参数是否为默认值"""
         default = ColorGradingParams()
         return (
             params.exposure == default.exposure and
             params.contrast == default.contrast and
+            params.gamma == default.gamma and
             params.temperature == default.temperature and
             params.saturation == default.saturation and
-            params.vibrance == default.vibrance
+            params.vibrance == default.vibrance and
+            params.blue_saturation == default.blue_saturation and
+            params.shadow_saturation == default.shadow_saturation
         )
-    
+
     def _semantic_style_match(self, text: str) -> Dict[str, Any]:
         """使用语义相似度匹配风格"""
         if self.text_encoder is None:
             return {}
-        
+
         try:
             # 编码输入文本
             text_embedding = self.text_encoder.encode([text])
-            
+
             # 编码所有风格关键词
             style_names = list(self.COLOR_KEYWORDS.keys())
             style_embeddings = self.text_encoder.encode(style_names)
-            
+
             # 计算相似度
             similarities = np.dot(text_embedding, style_embeddings.T)[0]
-            
+
             # 找到最相似的风格
             best_idx = np.argmax(similarities)
             best_similarity = similarities[best_idx]
-            
+
             # 相似度阈值（至少0.3才算匹配）
             if best_similarity > 0.3:
                 best_style = style_names[best_idx]
                 print(f"语义匹配: '{text}' -> '{best_style}' (相似度: {best_similarity:.2f})")
                 return self.COLOR_KEYWORDS[best_style].copy()
-            
+
         except Exception as e:
             print(f"语义匹配失败: {e}")
-        
+
         return {}
-    
+
     def _intelligent_inference(self, text: str, params: ColorGradingParams) -> ColorGradingParams:
         """
         智能推断调色参数
         支持否定词检测，避免误解用户意图
         """
         text_lower = text.lower()
-        
+
         # 否定词列表
         negation_words = ['不', '别', '勿', '不要', '不用', '无需', '别太', '不能太', '避免']
-        
+
         # 检测是否有否定词（检查否定词周围的上下文）
         def has_negation_near(keyword: str, text: str) -> bool:
             """检测关键词附近是否有否定词"""
@@ -496,48 +544,48 @@ class NLPColorParser:
             start = max(0, pos - 5)
             context = text[start:pos + len(keyword) + 2]
             return any(neg in context for neg in negation_words)
-        
+
         # 亮度相关词汇
         brightness_pos = ['亮', '明亮', '提亮', '光亮']
         brightness_neg = ['暗', '阴暗', '压暗', '昏暗']
-        
+
         if any(w in text_lower for w in brightness_pos):
             # 检查是否有否定
             is_negated = any(has_negation_near(w, text_lower) for w in brightness_pos if w in text_lower)
             params.exposure = -0.2 if is_negated else 0.3
-            
+
         if any(w in text_lower for w in brightness_neg):
             is_negated = any(has_negation_near(w, text_lower) for w in brightness_neg if w in text_lower)
             params.exposure = 0.3 if is_negated else -0.2
-            
+
         # 色温相关词汇
-        cool_words = ['冷', '冷色', '蓝', '清冷', '冰冷']
+        cool_words = ['冷', '冷色', '清冷', '冰冷', '蓝调']
         warm_words = ['暖', '暖色', '温暖', '黄', '金黄']
-        
+
         if any(w in text_lower for w in cool_words):
             is_negated = any(has_negation_near(w, text_lower) for w in cool_words if w in text_lower)
             params.temperature = 25 if is_negated else -25
-            
+
         if any(w in text_lower for w in warm_words):
             is_negated = any(has_negation_near(w, text_lower) for w in warm_words if w in text_lower)
             params.temperature = -25 if is_negated else 25
-            
+
         # 对比度相关
         high_contrast = ['对比', '层次', '立体']
         low_contrast = ['柔和', '柔软', '温柔']
-        
+
         if any(w in text_lower for w in high_contrast):
             is_negated = any(has_negation_near(w, text_lower) for w in high_contrast if w in text_lower)
             params.contrast = 0.9 if is_negated else 1.2
-            
+
         if any(w in text_lower for w in low_contrast):
             is_negated = any(has_negation_near(w, text_lower) for w in low_contrast if w in text_lower)
             params.contrast = 1.2 if is_negated else 0.9
-            
+
         # 饱和度相关
         vivid_words = ['鲜艳', '色彩', '彩色', '艳丽']
         dull_words = ['淡', '素', '灰']
-        
+
         if any(w in text_lower for w in vivid_words):
             is_negated = any(has_negation_near(w, text_lower) for w in vivid_words if w in text_lower)
             if is_negated:
@@ -545,7 +593,7 @@ class NLPColorParser:
             else:
                 params.saturation = 1.3
                 params.vibrance = 20
-                
+
         if any(w in text_lower for w in dull_words):
             is_negated = any(has_negation_near(w, text_lower) for w in dull_words if w in text_lower)
             if is_negated:
@@ -553,15 +601,15 @@ class NLPColorParser:
                 params.vibrance = 20
             else:
                 params.saturation = 0.7
-            
+
         # 清晰度相关
         sharp_words = ['清晰', '锐利', '锐化']
         soft_words = ['朦胧', '模糊', '梦幻']
-        
+
         if any(w in text_lower for w in sharp_words):
             is_negated = any(has_negation_near(w, text_lower) for w in sharp_words if w in text_lower)
             params.clarity = -20 if is_negated else 25
-            
+
         if any(w in text_lower for w in soft_words):
             is_negated = any(has_negation_near(w, text_lower) for w in soft_words if w in text_lower)
             if is_negated:
@@ -569,9 +617,8 @@ class NLPColorParser:
             else:
                 params.clarity = -20
                 params.fade = 0.1
-                
-        return params
 
+        return params
 
     def _is_reference_request(self, text: str) -> bool:
         """检测是否是参考/复刻类请求"""
@@ -606,15 +653,155 @@ class NLPColorParser:
                         # 根据参数类型设置调整值
                         if param_name == 'exposure':
                             params[param_name] = 0.3 * multiplier
+                        elif param_name == 'brightness':
+                            params[param_name] = 0.14 * multiplier
                         elif param_name == 'contrast':
                             params[param_name] = 1.0 + 0.2 * multiplier
+                        elif param_name == 'gamma':
+                            params[param_name] = 1.0 + 0.22 * multiplier
                         elif param_name == 'saturation':
                             params[param_name] = 1.0 + 0.2 * multiplier
                         elif param_name in ['temperature', 'tint', 'clarity', 'dehaze',
-                                           'highlights', 'shadows', 'whites', 'blacks', 'vibrance']:
+                                           'highlights', 'shadows', 'whites', 'blacks', 'vibrance',
+                                           'texture', 'midtone_detail', 'curve_shadows',
+                                           'curve_darks', 'curve_lights', 'curve_highlights']:
                             params[param_name] = 25 * multiplier
-                        elif param_name in ['vignette', 'grain']:
-                            params[param_name] = 20 * abs(multiplier)
+                        elif param_name in ['sharpen', 'bloom', 'vignette']:
+                            params[param_name] = 20 * abs(multiplier) if multiplier > 0 else 0
+                        elif param_name == 'noise_reduction':
+                            params[param_name] = 25 * abs(multiplier)
+                        elif param_name == 'grain':
+                            if multiplier < 0:
+                                params['grain'] = 0
+                                params['noise_reduction'] = 20 * abs(multiplier)
+                            else:
+                                params[param_name] = 20 * multiplier
+                        elif param_name.endswith('_saturation'):
+                            params[param_name] = 25 * multiplier
+
+        return params
+
+    def _parse_semantic_color_controls(self, text: str) -> Dict[str, Any]:
+        """解析更接近摄影调色语言的主体/颜色语义。"""
+        params: Dict[str, Any] = {}
+
+        def has_any(words: List[str]) -> bool:
+            return any(word in text for word in words)
+
+        def merge(values: Dict[str, Any]):
+            for key, value in values.items():
+                if key not in params:
+                    params[key] = value
+                elif isinstance(value, (int, float)) and isinstance(params[key], (int, float)):
+                    params[key] = (params[key] + value) / 2
+                else:
+                    params[key] = value
+
+        strong = has_any(['更', '加强', '增强', '浓', '鲜艳', '通透', '明显'])
+        soft = has_any(['稍微', '一点', '轻微', '淡一点', '别太', '不要太'])
+        scale = 1.35 if strong else 0.65 if soft else 1.0
+
+        if has_any(['天空', '蓝天', '云天']):
+            merge({
+                'blue_saturation': 24 * scale,
+                'blue_luminance': -6 * scale,
+                'aqua_saturation': 12 * scale,
+                'dehaze': max(params.get('dehaze', 0), 12 * scale),
+            })
+            if has_any(['清澈', '通透', '干净']):
+                merge({'clarity': 10 * scale, 'dehaze': 22 * scale})
+
+        if has_any(['海', '海水', '大海', '湖水', '湖面']):
+            merge({
+                'aqua_saturation': 22 * scale,
+                'blue_saturation': 18 * scale,
+                'aqua_luminance': 6 * scale,
+                'temperature': -8 * scale,
+                'dehaze': 12 * scale,
+            })
+
+        if has_any(['草地', '草坪', '树叶', '森林', '树林', '植被', '绿植']):
+            merge({
+                'green_saturation': 22 * scale,
+                'green_hue': -6 * scale,
+                'green_luminance': -4 * scale,
+                'yellow_saturation': -8 * scale,
+            })
+            if has_any(['森系', '清冷']):
+                merge({'temperature': -8 * scale, 'tint': -10 * scale})
+
+        if has_any(['肤色', '皮肤', '人像', '脸', '面部']):
+            merge({
+                'orange_luminance': 10 * scale,
+                'orange_saturation': 6 * scale,
+                'red_saturation': -8 * scale,
+                'texture': -12 * scale,
+                'clarity': -6 * scale,
+            })
+            if has_any(['别太红', '不要太红', '不红', '去红', '压红']):
+                merge({'red_saturation': -24 * scale, 'red_hue': 4 * scale})
+            if has_any(['白皙', '透亮', '干净']):
+                merge({'orange_luminance': 16 * scale, 'noise_reduction': 14 * scale})
+
+        if has_any(['夕阳', '日落', '晚霞', '金色', '金黄', '暖阳']):
+            merge({
+                'temperature': 24 * scale,
+                'orange_saturation': 16 * scale,
+                'yellow_saturation': 12 * scale,
+                'highlight_hue': 38,
+                'highlight_saturation': 24 * scale,
+            })
+
+        if has_any(['霓虹', '赛博', '夜店', '荧光']):
+            merge({
+                'contrast': 1.26,
+                'vibrance': 32 * scale,
+                'blue_saturation': 18 * scale,
+                'purple_saturation': 20 * scale,
+                'magenta_saturation': 24 * scale,
+                'bloom': 22 * scale,
+                'shadow_hue': 235,
+                'shadow_saturation': 22 * scale,
+                'highlight_hue': 305,
+                'highlight_saturation': 26 * scale,
+            })
+
+        if has_any(['胶片', '复古', '怀旧', '老照片']):
+            merge({
+                'fade': 0.14 * scale,
+                'grain': 18 * scale,
+                'curve_shadows': 12 * scale,
+                'curve_highlights': -6 * scale,
+                'saturation': 0.88,
+            })
+
+        if has_any(['柔雾', '朦胧', '梦幻', '柔焦']):
+            merge({
+                'clarity': -20 * scale,
+                'texture': -16 * scale,
+                'dehaze': -18 * scale,
+                'bloom': 18 * scale,
+            })
+
+        if has_any(['清透', '通透', '干净', '透亮']):
+            merge({
+                'dehaze': max(params.get('dehaze', 0), 20 * scale),
+                'clarity': max(params.get('clarity', 0), 12 * scale),
+                'midtone_detail': max(params.get('midtone_detail', 0), 10 * scale),
+                'noise_reduction': max(params.get('noise_reduction', 0), 8 * scale),
+            })
+
+        if has_any(['青橙', '青蓝橙', '电影蓝橙']):
+            merge({
+                'contrast': 1.22,
+                'saturation': 0.9,
+                'shadow_hue': 195,
+                'shadow_saturation': 28 * scale,
+                'highlight_hue': 38,
+                'highlight_saturation': 24 * scale,
+                'curve_darks': -10 * scale,
+                'curve_lights': 8 * scale,
+            })
 
         return params
 
@@ -630,15 +817,41 @@ class NLPColorParser:
         if intensity != 1.0:
             # 对数值类参数应用强度调整
             params.exposure *= intensity
+            params.brightness *= intensity
             params.contrast = 1.0 + (params.contrast - 1.0) * intensity
+            params.gamma = 1.0 + (params.gamma - 1.0) * intensity
             params.saturation = 1.0 + (params.saturation - 1.0) * intensity
             params.temperature *= intensity
             params.tint *= intensity
             params.vibrance *= intensity
             params.clarity *= intensity
+            params.texture *= intensity
+            params.midtone_detail *= intensity
+            params.sharpen *= intensity
+            params.noise_reduction *= intensity
             params.dehaze *= intensity
+            params.bloom *= intensity
             params.highlights *= intensity
             params.shadows *= intensity
+            params.whites *= intensity
+            params.blacks *= intensity
+            params.vignette *= intensity
+            params.grain *= intensity
+            params.fade *= intensity
+            params.curve_shadows *= intensity
+            params.curve_darks *= intensity
+            params.curve_lights *= intensity
+            params.curve_highlights *= intensity
+            params.shadow_saturation *= intensity
+            params.midtone_saturation *= intensity
+            params.highlight_saturation *= intensity
+
+            for color_name in [
+                    'red', 'orange', 'yellow', 'green',
+                    'aqua', 'blue', 'purple', 'magenta']:
+                for suffix in ['hue', 'saturation', 'luminance']:
+                    attr = f'{color_name}_{suffix}'
+                    setattr(params, attr, getattr(params, attr) * intensity)
 
         return params
 
@@ -647,6 +860,8 @@ class NLPColorParser:
         """合并参数"""
         if isinstance(updates, ColorGradingParams):
             updates = updates.to_dict()
+        else:
+            updates = ColorGradingParams.normalize_dict(updates)
 
         base_dict = base.to_dict()
         for key, value in updates.items():

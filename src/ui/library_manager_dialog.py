@@ -7,6 +7,7 @@ import os
 import platform
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 import cv2
 
 # 导入中文路径安全的图像IO函数 (使用相对导入)
@@ -20,10 +21,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QSize, QThread
 from PySide6.QtGui import QIcon, QPixmap, QImage
 
-# 使用相对导入项目模块
-from ..ai import ImageIndexDatabase
 from .image_picker_dialog import pick_images
 from .ui_utils import fit_thumbnail_size
+
+if TYPE_CHECKING:
+    from ..ai import ImageIndexDatabase
 
 
 logger = logging.getLogger(__name__)
@@ -74,7 +76,7 @@ class LibraryManagerDialog(QDialog):
     import_requested = Signal(list)  # 请求导入
     delete_requested = Signal(str)   # 请求删除
     
-    def __init__(self, image_db: ImageIndexDatabase, parent=None):
+    def __init__(self, image_db: "ImageIndexDatabase", parent=None):
         super().__init__(parent)
         self.setObjectName("libraryManagerDialog")
         self.image_db = image_db

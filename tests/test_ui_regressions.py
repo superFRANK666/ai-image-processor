@@ -202,8 +202,7 @@ class ColorPanelRegressionTests(unittest.TestCase):
         panel.reset_btn.click()
         self.assertEqual(len(emitted), 1)
 
-    def test_preset_submission_does_not_override_external_busy_state(self):
-        from PySide6.QtCore import QEventLoop, QTimer
+    def test_text_submission_does_not_override_external_busy_state(self):
         from src.ui.color_grading_panel import ColorGradingPanel
 
         panel = ColorGradingPanel()
@@ -213,11 +212,8 @@ class ColorPanelRegressionTests(unittest.TestCase):
             panel.apply_btn.setEnabled(False)
 
         panel.text_input_submitted.connect(mark_busy)
-        panel.preset_combo.setCurrentText("电影感")
-
-        loop = QEventLoop()
-        QTimer.singleShot(650, loop.quit)
-        loop.exec()
+        panel.text_input.setText("电影感")
+        panel.apply_btn.click()
 
         self.assertEqual(panel.apply_btn.text(), "分析中...")
         self.assertFalse(panel.apply_btn.isEnabled())
@@ -229,14 +225,18 @@ class ColorPanelRegressionTests(unittest.TestCase):
         panel.set_image_available(False)
 
         self.assertFalse(panel.apply_btn.isEnabled())
-        self.assertFalse(panel.preset_combo.isEnabled())
+        self.assertFalse(panel.look_combo.isEnabled())
         self.assertFalse(panel.exposure_slider.isEnabled())
+        self.assertFalse(panel.brightness_slider.isEnabled())
+        self.assertFalse(panel.gamma_slider.isEnabled())
 
         panel.set_image_available(True)
 
         self.assertTrue(panel.apply_btn.isEnabled())
-        self.assertTrue(panel.preset_combo.isEnabled())
+        self.assertTrue(panel.look_combo.isEnabled())
         self.assertTrue(panel.exposure_slider.isEnabled())
+        self.assertTrue(panel.brightness_slider.isEnabled())
+        self.assertTrue(panel.gamma_slider.isEnabled())
 
     def test_ui_font_picker_prefers_available_chinese_friendly_font(self):
         from src.ui.font_utils import choose_ui_font
@@ -353,11 +353,11 @@ class ColorPanelRegressionTests(unittest.TestCase):
 
         panel = ColorGradingPanel()
         emitted = []
-        deleted = []
         saved = []
+        reset = []
         panel.look_apply_requested.connect(emitted.append)
-        panel.delete_look_requested.connect(deleted.append)
         panel.save_look_requested.connect(lambda: saved.append(True))
+        panel.reset_all_requested.connect(lambda: reset.append(True))
 
         panel.set_look_presets([
             {"id": "builtin-film", "name": "电影感", "source": "builtin", "params": {}},
@@ -366,21 +366,46 @@ class ColorPanelRegressionTests(unittest.TestCase):
 
         panel.look_combo.setCurrentIndex(1)
         self.assertFalse(panel.look_apply_btn.isEnabled())
-        self.assertFalse(panel.delete_look_btn.isEnabled())
+        self.assertFalse(panel.reset_to_original_btn.isEnabled())
 
         panel.set_image_available(True)
         self.assertTrue(panel.look_apply_btn.isEnabled())
-        self.assertFalse(panel.delete_look_btn.isEnabled())
+        self.assertTrue(panel.reset_to_original_btn.isEnabled())
         panel.look_apply_btn.click()
         self.assertEqual(emitted, ["builtin-film"])
 
         panel.look_combo.setCurrentIndex(2)
-        self.assertTrue(panel.delete_look_btn.isEnabled())
-        panel.delete_look_btn.click()
-        self.assertEqual(deleted, ["custom-soft"])
+        panel.look_apply_btn.click()
+        self.assertEqual(emitted, ["builtin-film", "custom-soft"])
 
         panel.save_look_btn.click()
         self.assertEqual(saved, [True])
+        panel.reset_to_original_btn.click()
+        self.assertEqual(reset, [True])
+
+    def test_color_panel_preserves_hidden_llm_parameters(self):
+        from src.ai.color_params import ColorGradingParams
+        from src.ui.color_grading_panel import ColorGradingPanel
+
+        panel = ColorGradingPanel()
+        panel.set_params(ColorGradingParams(
+            exposure=0.2,
+            brightness=0.1,
+            blue_saturation=34,
+            orange_luminance=12,
+            shadow_hue=195,
+            shadow_saturation=24,
+        ))
+
+        panel.exposure_slider.set_value(0.35)
+        params = panel.get_params()
+
+        self.assertEqual(params.exposure, 0.35)
+        self.assertEqual(params.brightness, 0.1)
+        self.assertEqual(params.blue_saturation, 34)
+        self.assertEqual(params.orange_luminance, 12)
+        self.assertEqual(params.shadow_hue, 195)
+        self.assertEqual(params.shadow_saturation, 24)
 
     def test_thumbnail_size_never_rounds_down_to_zero(self):
         from src.ui.ui_utils import fit_thumbnail_size, fit_within_size

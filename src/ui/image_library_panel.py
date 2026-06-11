@@ -15,8 +15,8 @@ from PySide6.QtWidgets import (
     QScrollArea, QGridLayout, QLineEdit, QMenu, QComboBox, QInputDialog,
     QMessageBox, QFrame
 )
-from PySide6.QtCore import Qt, Signal, QThread
-from PySide6.QtGui import QPixmap, QImage, QCursor
+from PySide6.QtCore import Qt, Signal, QThread, QTimer, QSize
+from PySide6.QtGui import QPixmap, QImage, QCursor, QPainter, QColor, QPen
 
 from .image_picker_dialog import pick_images
 from .ui_utils import fit_thumbnail_size
@@ -179,6 +179,48 @@ class RebuildIndexThread(QThread):
             self.rebuild_canceled.emit()
         except Exception as e:
             self.rebuild_failed.emit(str(e))
+
+
+class LoadingSpinnerWidget(QWidget):
+    """用于图像库准备态的轻量加载指示器。"""
+
+    def __init__(self, size: int = 34, parent=None):
+        super().__init__(parent)
+        self._size = size
+        self._angle = 0
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(35)
+        self._timer.timeout.connect(self._rotate)
+        self._timer.start()
+
+    def sizeHint(self):
+        return QSize(self._size, self._size)
+
+    def _rotate(self):
+        self._angle = (self._angle + 12) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+
+        side = min(self.width(), self.height())
+        pen_width = max(3, side // 10)
+        margin = pen_width + 2
+        arc_rect = self.rect().adjusted(margin, margin, -margin, -margin)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        track_pen = QPen(QColor("#263237"), pen_width, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(track_pen)
+        painter.drawArc(arc_rect, 0, 360 * 16)
+
+        accent_pen = QPen(QColor("#18c7a7"), pen_width, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(accent_pen)
+        painter.drawArc(arc_rect, -self._angle * 16, -270 * 16)
 
 
 class ImageLibraryPanel(QWidget):
@@ -415,7 +457,11 @@ class ImageLibraryPanel(QWidget):
             self.status_label.setText("图像库未初始化")
             self._set_summary("素材库暂不可用。图像数据库加载完成后，可在这里检索和管理素材。")
             self._sync_summary_metrics(0)
-            self._show_empty_state("图像库正在准备", "模型和索引加载完成后，素材会显示在这里。")
+            self._show_empty_state(
+                "图像库正在准备",
+                "模型和索引加载完成后，素材会显示在这里。",
+                show_spinner=True,
+            )
         else:
             self._sync_summary_metrics(len(self._thumbnails))
 
@@ -608,7 +654,7 @@ class ImageLibraryPanel(QWidget):
         self.library_state_badge.style().unpolish(self.library_state_badge)
         self.library_state_badge.style().polish(self.library_state_badge)
 
-    def _show_empty_state(self, title: str, subtitle: str):
+    def _show_empty_state(self, title: str, subtitle: str, show_spinner: bool = False):
         """在缩略图网格中显示空状态。"""
         if self.empty_state is not None:
             for index in range(self.thumbnail_layout.count()):
@@ -624,6 +670,10 @@ class ImageLibraryPanel(QWidget):
         empty_layout = QVBoxLayout(self.empty_state)
         empty_layout.setContentsMargins(24, 24, 24, 24)
         empty_layout.setSpacing(10)
+
+        if show_spinner:
+            spinner = LoadingSpinnerWidget(parent=self.empty_state)
+            empty_layout.addWidget(spinner, 0, Qt.AlignCenter)
 
         self.empty_title_label = QLabel(title)
         self.empty_title_label.setObjectName("libraryEmptyTitle")

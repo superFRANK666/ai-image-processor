@@ -32,15 +32,19 @@ if not exist "venv\Scripts\activate.bat" (
     echo.
 )
 
-:: 2. Activate
-echo [OK] Activating environment...
-call venv\Scripts\activate.bat
+:: 2. Use venv Python directly. This is faster than activating the shell first.
+set "PYTHON=venv\Scripts\python.exe"
+if not exist "%PYTHON%" (
+    echo [ERROR] Missing %PYTHON%
+    pause
+    exit /b 1
+)
 
 :: 3. Run
 echo [OK] Starting application...
 echo.
 
-python main.py
+"%PYTHON%" main.py
 
 :: 4. Crash Handling
 if errorlevel 1 (

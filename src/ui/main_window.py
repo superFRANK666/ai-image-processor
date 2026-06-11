@@ -174,7 +174,6 @@ class MainWindow(QMainWindow):
         # 设置UI
         self._setup_ui()
         self._setup_menu()
-        self._setup_toolbar()
         self._setup_statusbar()
         self._connect_signals()
         self._refresh_look_presets()
@@ -183,9 +182,8 @@ class MainWindow(QMainWindow):
         # 应用样式
         self.setStyleSheet(get_dark_style())
 
-        # 延迟加载图像数据库（在窗口显示后加载，避免阻塞启动）
-        # 从100ms增加到1000ms，让窗口先显示，用户体验更好
-        QTimer.singleShot(1000, self._deferred_init)
+        # 延迟加载图像数据库：先让主窗口完成首屏渲染，再后台初始化检索能力。
+        QTimer.singleShot(1200, self._deferred_init)
 
     def _register_models(self):
         """注册所有 AI 模型到 ModelManager"""
@@ -529,6 +527,13 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        file_menu.addSeparator()
+
+        exit_action = QAction("退出(&X)", self)
+        exit_action.setShortcut(QKeySequence.Quit)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
         # 编辑菜单
         edit_menu = menubar.addMenu("编辑(&E)")
 
@@ -645,7 +650,8 @@ class MainWindow(QMainWindow):
         self.color_panel.upload_reference_requested.connect(self.upload_and_apply_reference)
         self.color_panel.look_apply_requested.connect(self.apply_look_preset)
         self.color_panel.save_look_requested.connect(self.save_current_look_preset)
-        self.color_panel.delete_look_requested.connect(self.delete_look_preset)
+        self.color_panel.reset_all_requested.connect(self.reset_image)  # 恢复原图
+
 
         # AGI相机信号
         self.agi_panel.generate_3d_requested.connect(self.generate_3d)
@@ -671,13 +677,14 @@ class MainWindow(QMainWindow):
         self.image_viewer.open_requested.connect(self.open_image)
         self.image_viewer.import_requested.connect(self._open_import_workflow)
         self.image_viewer.image_dropped.connect(self.load_image)
+        self.image_viewer.compare_toggled.connect(self.toggle_compare)
 
     def _set_compare_checked(self, checked: bool):
         """同步对比按钮状态，避免切换图片时保留旧图对比。"""
-        if hasattr(self, 'compare_btn'):
-            self.compare_btn.blockSignals(True)
-            self.compare_btn.setChecked(checked)
-            self.compare_btn.blockSignals(False)
+        if hasattr(self.image_viewer, 'compare_btn'):
+            self.image_viewer.compare_btn.blockSignals(True)
+            self.image_viewer.compare_btn.setChecked(checked)
+            self.image_viewer.compare_btn.blockSignals(False)
         if hasattr(self, 'command_compare_btn'):
             self.command_compare_btn.blockSignals(True)
             self.command_compare_btn.setChecked(checked)

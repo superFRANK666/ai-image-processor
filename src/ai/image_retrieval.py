@@ -238,6 +238,7 @@ class ImageFeatureExtractor:
         self.local_model_path = local_model_path
         self.enable_preprocessing = enable_preprocessing
         self.model = None
+        self.image_model = None
         self.embedding_dim = 512
         self._model_init_attempted = False
         self._is_multilingual = False  # 标记是否为多语言模型
@@ -303,6 +304,17 @@ class ImageFeatureExtractor:
                 # 检测是否为多语言模型
                 if "multilingual" in model_path.lower():
                     self._is_multilingual = True
+                    # 对于多语言模型，我们需要额外的原始CLIP模型来提取图像特征
+                    project_dir = Path(__file__).parent.parent.parent
+                    english_path = project_dir / "models" / "clip-ViT-B-32"
+                    if english_path.exists():
+                        print(f"尝试加载图像编码器: {english_path}")
+                        self.image_model = SentenceTransformer(str(english_path))
+                    else:
+                        print("警告: 找不到对应的英文模型，无法提取图像语义特征")
+                        self.image_model = None
+                else:
+                    self.image_model = self.model
 
                 print(f"CLIP模型加载成功: {model_path}")
                 print(f"  - 多语言支持: {'是' if self._is_multilingual else '否'}")
@@ -322,6 +334,7 @@ class ImageFeatureExtractor:
 
         print("所有CLIP模型加载失败, 将使用传统特征提取")
         self.model = None
+        self.image_model = None
 
     def extract_features(self, image: np.ndarray, image_path: str = "",
                         use_enhancement: bool = True) -> ImageFeature:
@@ -376,7 +389,7 @@ class ImageFeatureExtractor:
         if not self._model_init_attempted:
             self._init_model()
 
-        if self.model is not None:
+        if self.image_model is not None:
             try:
                 # 转换为RGB
                 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -384,7 +397,7 @@ class ImageFeatureExtractor:
                 pil_image = Image.fromarray(image_rgb)
 
                 # 使用CLIP编码图像
-                embedding = self.model.encode(pil_image)
+                embedding = self.image_model.encode(pil_image)
                 return embedding
             except Exception as e:
                 logger.error(f"语义特征提取失败: {e}")
@@ -603,10 +616,27 @@ class ImageIndexDatabase:
             return
 
         try:
-            self.client = chromadb.PersistentClient(path=str(self.db_path))
+            from chromadb.config import Settings
+            settings = Settings(anonymized_telemetry=False)
+            self.client = chromadb.PersistentClient(path=str(self.db_path), settings=settings)
+            
+            try:
+                from chromadb.api.types import EmbeddingFunction
+                class DummyEmbeddingFunction(EmbeddingFunction):
+                    def __init__(self):
+                        pass
+                    def name(self) -> str:
+                        return "default"
+                    def __call__(self, input):
+                        return [[0.0]*512] * len(input)
+                dummy_ef = DummyEmbeddingFunction()
+            except ImportError:
+                dummy_ef = None
+                
             self.collection = self.client.get_or_create_collection(
                 name="image_features",
-                metadata={"hnsw:space": "cosine"}
+                metadata={"hnsw:space": "cosine"},
+                embedding_function=dummy_ef
             )
         except Exception as e:
             logger.error(f"ChromaDB初始化失败: {e}")
