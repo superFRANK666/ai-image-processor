@@ -25,10 +25,58 @@ class NLPColorParser:
         '暖色': {'temperature': 25},
         '暖调': {'temperature': 20, 'saturation': 1.05},
         '金色': {'temperature': 35, 'saturation': 1.15},
+        '金黄': {
+            'temperature': 28, 'vibrance': 14,
+            'orange_saturation': 16, 'yellow_saturation': 20,
+            'yellow_luminance': 8, 'highlight_hue': 42,
+            'highlight_saturation': 24,
+        },
+        '黄色': {
+            'temperature': 18, 'yellow_saturation': 22,
+            'yellow_luminance': 6, 'highlight_hue': 48,
+            'highlight_saturation': 14,
+        },
         '橙调': {'temperature': 30, 'hue_shift': 15},
         '绿调': {'tint': -20, 'hue_shift': 60},
+        '深绿色': {
+            'exposure': -0.08, 'gamma': 0.92, 'tint': -18,
+            'green_hue': -8, 'green_saturation': 34,
+            'green_luminance': -14, 'yellow_saturation': -16,
+            'curve_darks': -8, 'midtone_hue': 132,
+            'midtone_saturation': 18,
+        },
+        '绿色': {
+            'tint': -14, 'green_hue': -6, 'green_saturation': 26,
+            'green_luminance': -4, 'yellow_saturation': -10,
+            'midtone_hue': 128, 'midtone_saturation': 10,
+        },
+        '蓝色': {
+            'temperature': -18, 'blue_saturation': 26,
+            'blue_luminance': -6, 'aqua_saturation': 10,
+            'shadow_hue': 220, 'shadow_saturation': 12,
+        },
+        '红色': {
+            'temperature': 10, 'red_saturation': 24,
+            'red_luminance': 4, 'orange_saturation': 8,
+            'highlight_hue': 20, 'highlight_saturation': 12,
+        },
+        '青色': {
+            'temperature': -12, 'aqua_saturation': 24,
+            'aqua_luminance': 5, 'blue_saturation': 10,
+            'shadow_hue': 188, 'shadow_saturation': 12,
+        },
         '粉调': {'tint': 25, 'saturation': 0.95},
+        '粉色': {
+            'tint': 22, 'red_saturation': 10, 'orange_luminance': 8,
+            'magenta_saturation': 18, 'highlight_hue': 330,
+            'highlight_saturation': 12,
+        },
         '紫调': {'hue_shift': -30, 'tint': 15},
+        '紫色': {
+            'tint': 15, 'purple_saturation': 26,
+            'magenta_saturation': 12, 'shadow_hue': 270,
+            'shadow_saturation': 14,
+        },
 
         # 风格关键词
         '复古': {'saturation': 0.85, 'contrast': 1.1, 'fade': 0.12, 'grain': 15},
@@ -325,12 +373,14 @@ class NLPColorParser:
                     llm_params = result.get("parameters", {})
                     if llm_params:
                         params = self._merge_params(params, llm_params)
-                        print(f"[LLM分析] 参数: {self._format_params(params)}")
-                        return params
+                        if not self._is_default_params(params):
+                            print(f"[LLM分析] 参数: {self._format_params(params)}")
+                            return params
+                        print("[LLM分析] 返回了默认参数，回退到传统匹配")
+                    else:
+                        print("[LLM分析] 未返回参数，回退到传统匹配")
                 else:
-                    print(f"[LLM分析] 非调色指令: {result.get('reasoning', '')}")
-                    # 返回默认参数
-                    return params
+                    print(f"[LLM分析] 非调色指令: {result.get('reasoning', '')}，尝试传统匹配")
 
             except Exception as e:
                 print(f"[LLM分析] 失败: {e}，回退到传统匹配")
@@ -409,24 +459,24 @@ class NLPColorParser:
                     if llm_params:
                         params = ColorGradingParams()
                         params = self._merge_params(params, llm_params)
-                        print(f"[LLM分析] 参数: {self._format_params(params)}")
-                        on_success(params)
+                        if not self._is_default_params(params):
+                            print(f"[LLM分析] 参数: {self._format_params(params)}")
+                            on_success(params)
+                            return
+                        print("[LLM分析] 返回了默认参数，回退到传统匹配")
                     else:
-                        on_success(ColorGradingParams())
+                        print("[LLM分析] 未返回参数，回退到传统匹配")
                 else:
-                    print(f"[LLM分析] 非调色指令: {result.get('reasoning', '')}")
-                    # 返回默认参数
-                    on_success(ColorGradingParams())
+                    print(f"[LLM分析] 非调色指令: {result.get('reasoning', '')}，尝试传统匹配")
+
+                params = self._traditional_parse(text_lower, original_text)
+                on_success(params)
 
             except Exception as e:
                 error_msg = f"[LLM分析] 结果处理失败: {e}"
                 print(error_msg)
-                if on_error:
-                    on_error(error_msg)
-                else:
-                    # 回退到传统匹配
-                    params = self._traditional_parse(text_lower, original_text)
-                    on_success(params)
+                params = self._traditional_parse(text_lower, original_text)
+                on_success(params)
 
         def handle_llm_error(error_msg: str):
             """LLM分析失败回调"""
@@ -473,25 +523,64 @@ class NLPColorParser:
         return params
 
     def _format_params(self, params: ColorGradingParams) -> str:
-        """格式化参数用于日志输出"""
-        return (f"曝光={params.exposure:.2f}, 对比度={params.contrast:.2f}, "
-                f"Gamma={params.gamma:.2f}, 色温={params.temperature:.0f}, "
-                f"饱和度={params.saturation:.2f}, 蓝HSL={params.blue_saturation:.0f}, "
-                f"阴影色轮={params.shadow_saturation:.0f}")
+        """格式化参数用于日志输出，动态显示修改过的参数"""
+        default = ColorGradingParams()
+        p_dict = params.to_dict()
+        d_dict = default.to_dict()
+
+        name_map = {
+            "exposure": "曝光", "contrast": "对比度", "gamma": "Gamma",
+            "temperature": "色温", "tint": "色调", "saturation": "饱和度",
+            "vibrance": "自然饱和度", "highlights": "高光", "shadows": "阴影",
+            "whites": "白色", "blacks": "黑色", "clarity": "清晰度",
+            "texture": "纹理", "dehaze": "去雾", "blue_saturation": "蓝HSL",
+            "shadow_saturation": "阴影色轮强度", "curve_shadows": "曲线阴影",
+            "curve_highlights": "曲线高光", "bloom": "柔光", "vignette": "暗角",
+            "grain": "颗粒", "sharpen": "锐化", "noise_reduction": "降噪"
+        }
+        for color_key, color_label in (
+                ("red", "红色"), ("orange", "橙色"), ("yellow", "黄色"), ("green", "绿色"),
+                ("aqua", "青色"), ("blue", "蓝色"), ("purple", "紫色"), ("magenta", "品红")):
+            name_map.update({
+                f"{color_key}_hue": f"{color_label}色相",
+                f"{color_key}_saturation": f"{color_label}饱和",
+                f"{color_key}_luminance": f"{color_label}明度",
+            })
+
+        changed = []
+        for k, v in p_dict.items():
+            d_v = d_dict.get(k, 0)
+            if isinstance(v, (int, float)) and isinstance(d_v, (int, float)):
+                if abs(v - d_v) > 0.01:
+                    name = name_map.get(k, k)
+                    if isinstance(v, float) and abs(v) <= 5:
+                        changed.append(f"{name}={v:.2f}")
+                    else:
+                        changed.append(f"{name}={v:.0f}")
+            else:
+                if v != d_v:
+                    name = name_map.get(k, k)
+                    changed.append(f"{name}={v}")
+
+        if not changed:
+            return "参数保持默认"
+
+        return ", ".join(changed[:15]) + ("..." if len(changed) > 15 else "")
 
     def _is_default_params(self, params: ColorGradingParams) -> bool:
         """检查参数是否为默认值"""
         default = ColorGradingParams()
-        return (
-            params.exposure == default.exposure and
-            params.contrast == default.contrast and
-            params.gamma == default.gamma and
-            params.temperature == default.temperature and
-            params.saturation == default.saturation and
-            params.vibrance == default.vibrance and
-            params.blue_saturation == default.blue_saturation and
-            params.shadow_saturation == default.shadow_saturation
-        )
+        params_dict = params.to_dict()
+        default_dict = default.to_dict()
+
+        for key, value in params_dict.items():
+            default_value = default_dict.get(key)
+            if isinstance(value, (int, float)) and isinstance(default_value, (int, float)):
+                if abs(value - default_value) > 0.01:
+                    return False
+            elif value != default_value:
+                return False
+        return True
 
     def _semantic_style_match(self, text: str) -> Dict[str, Any]:
         """使用语义相似度匹配风格"""
@@ -720,13 +809,24 @@ class NLPColorParser:
                 'dehaze': 12 * scale,
             })
 
-        if has_any(['草地', '草坪', '树叶', '森林', '树林', '植被', '绿植']):
+        if has_any(['草地', '草坪', '树叶', '森林', '树林', '植被', '绿植', '绿色', '绿意']):
             merge({
                 'green_saturation': 22 * scale,
                 'green_hue': -6 * scale,
                 'green_luminance': -4 * scale,
                 'yellow_saturation': -8 * scale,
             })
+            if has_any(['深绿', '深绿色', '墨绿', '暗绿']):
+                merge({
+                    'exposure': -0.08 * scale,
+                    'gamma': 0.92,
+                    'green_saturation': 32 * scale,
+                    'green_luminance': -14 * scale,
+                    'yellow_saturation': -16 * scale,
+                    'curve_darks': -8 * scale,
+                    'midtone_hue': 132,
+                    'midtone_saturation': 18 * scale,
+                })
             if has_any(['森系', '清冷']):
                 merge({'temperature': -8 * scale, 'tint': -10 * scale})
 

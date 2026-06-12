@@ -61,6 +61,8 @@ class ImageFeature:
     color_histogram: np.ndarray  # 颜色直方图特征
     dominant_colors: List[Tuple[int, int, int]]  # 主色调
     metadata: Dict[str, Any]
+    embedding_backend: str = "traditional"
+    embedding_model: str = ""
     # 新增特征
     texture_features: np.ndarray = field(default_factory=lambda: np.array([]))  # 纹理特征
     edge_features: np.ndarray = field(default_factory=lambda: np.array([]))  # 边缘特征
@@ -242,6 +244,10 @@ class ImageFeatureExtractor:
         self.embedding_dim = 512
         self._model_init_attempted = False
         self._is_multilingual = False  # 标记是否为多语言模型
+        self.image_embedding_backend = "traditional"
+        self.image_embedding_model = "traditional"
+        self._last_embedding_backend = "traditional"
+        self._last_embedding_model = "traditional"
 
         # 检查本地模型路径
         if local_model_path is None:
@@ -255,6 +261,96 @@ class ImageFeatureExtractor:
                 self._is_multilingual = True
             elif english_path.exists() and (english_path / "0_CLIPModel" / "model.safetensors").exists():
                 self.local_model_path = str(english_path)
+
+    def _get_model_embedding_dimension(self, model) -> int:
+        """返回模型 embedding 维度，兼容 sentence-transformers 新旧 API。"""
+        getter = getattr(model, "get_embedding_dimension", None)
+        if callable(getter):
+            return int(getter())
+
+        legacy_getter = getattr(model, "get_sentence_embedding_dimension", None)
+        if callable(legacy_getter):
+            return int(legacy_getter())
+
+        return int(self.embedding_dim)
+
+    @staticmethod
+    def _is_local_sentence_transformer(path: Path) -> bool:
+        """粗略判断本地目录是否像 sentence-transformers 模型。"""
+        return path.exists() and ((path / "modules.json").exists() or (path / "config.json").exists())
+
+    @staticmethod
+    def _snapshot_offline_env() -> Dict[str, Optional[str]]:
+        return {
+            "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE"),
+            "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE"),
+        }
+
+    @staticmethod
+    def _restore_offline_env(snapshot: Dict[str, Optional[str]]):
+        for env_name, original_value in snapshot.items():
+            if original_value is None:
+                os.environ.pop(env_name, None)
+            else:
+                os.environ[env_name] = original_value
+
+    @staticmethod
+    def _set_model_env_for_source(source: str):
+        if source == "online":
+            os.environ.pop('HF_HUB_OFFLINE', None)
+            os.environ.pop('TRANSFORMERS_OFFLINE', None)
+        else:
+            os.environ['HF_HUB_OFFLINE'] = '1'
+            os.environ['TRANSFORMERS_OFFLINE'] = '1'
+
+    def _load_image_encoder_for_multilingual_text_model(self) -> bool:
+        """多语言 CLIP 文本模型需要原始 CLIP 图像编码器来生成同空间图片向量。"""
+        if SentenceTransformer is None:
+            return False
+
+        project_dir = Path(__file__).parent.parent.parent
+        english_path = project_dir / "models" / "clip-ViT-B-32"
+        candidates = []
+
+        if self._is_local_sentence_transformer(english_path):
+            candidates.append(("local", str(english_path)))
+
+        candidates.append(("online", MULTILINGUAL_CLIP_MODELS["english"]))
+
+        for source, model_path in candidates:
+            env_snapshot = self._snapshot_offline_env()
+            try:
+                if source == "local":
+                    print(f"尝试加载图像编码器: {model_path}")
+                else:
+                    print(f"尝试在线加载图像编码器: {model_path}")
+
+                self._set_model_env_for_source(source)
+                image_model = SentenceTransformer(model_path)
+                image_dim = self._get_model_embedding_dimension(image_model)
+                if image_dim != self.embedding_dim:
+                    print(
+                        f"图像编码器维度不匹配: {image_dim} != {self.embedding_dim}，跳过 {model_path}"
+                    )
+                    continue
+
+                self.image_model = image_model
+                self.image_embedding_backend = "clip_image"
+                self.image_embedding_model = str(model_path)
+                print(f"图像编码器加载成功: {model_path}")
+                return True
+
+            except Exception as e:
+                logger.warning("图像编码器加载失败 (%s): %s", model_path, e)
+                print(f"图像编码器加载失败 ({model_path}): {e}")
+            finally:
+                self._restore_offline_env(env_snapshot)
+
+        self.image_model = None
+        self.image_embedding_backend = "traditional"
+        self.image_embedding_model = "traditional"
+        print("警告: 找不到可用的CLIP图像编码器，文本语义检索将跳过不兼容的旧图像向量")
+        return False
 
     def _init_model(self):
         """延迟初始化CLIP模型 (支持多语言)"""
@@ -283,42 +379,28 @@ class ImageFeatureExtractor:
             models_to_try.append(("online", MULTILINGUAL_CLIP_MODELS["english"]))
 
         for source, model_path in models_to_try:
-            env_snapshot = {
-                "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE"),
-                "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE"),
-            }
+            env_snapshot = self._snapshot_offline_env()
             try:
                 print(f"尝试加载CLIP模型: {model_path} ({source})")
 
-                # 对于在线模型，允许下载
-                if source == "online":
-                    os.environ.pop('HF_HUB_OFFLINE', None)
-                    os.environ.pop('TRANSFORMERS_OFFLINE', None)
-                else:
-                    os.environ['HF_HUB_OFFLINE'] = '1'
-                    os.environ['TRANSFORMERS_OFFLINE'] = '1'
+                self._set_model_env_for_source(source)
 
                 self.model = SentenceTransformer(model_path)
-                self.embedding_dim = self.model.get_sentence_embedding_dimension()
+                self.embedding_dim = self._get_model_embedding_dimension(self.model)
 
                 # 检测是否为多语言模型
                 if "multilingual" in model_path.lower():
                     self._is_multilingual = True
-                    # 对于多语言模型，我们需要额外的原始CLIP模型来提取图像特征
-                    project_dir = Path(__file__).parent.parent.parent
-                    english_path = project_dir / "models" / "clip-ViT-B-32"
-                    if english_path.exists():
-                        print(f"尝试加载图像编码器: {english_path}")
-                        self.image_model = SentenceTransformer(str(english_path))
-                    else:
-                        print("警告: 找不到对应的英文模型，无法提取图像语义特征")
-                        self.image_model = None
+                    self._load_image_encoder_for_multilingual_text_model()
                 else:
                     self.image_model = self.model
+                    self.image_embedding_backend = "clip_image"
+                    self.image_embedding_model = str(model_path)
 
                 print(f"CLIP模型加载成功: {model_path}")
                 print(f"  - 多语言支持: {'是' if self._is_multilingual else '否'}")
                 print(f"  - 特征维度: {self.embedding_dim}")
+                print(f"  - 图像语义编码: {'可用' if self.image_model is not None else '不可用'}")
                 return
 
             except Exception as e:
@@ -326,11 +408,7 @@ class ImageFeatureExtractor:
                 print(f"模型加载失败 ({model_path}): {e}")
                 continue
             finally:
-                for env_name, original_value in env_snapshot.items():
-                    if original_value is None:
-                        os.environ.pop(env_name, None)
-                    else:
-                        os.environ[env_name] = original_value
+                self._restore_offline_env(env_snapshot)
 
         print("所有CLIP模型加载失败, 将使用传统特征提取")
         self.model = None
@@ -357,6 +435,8 @@ class ImageFeatureExtractor:
 
         # 提取语义特征 (CLIP embedding)
         embedding = self._extract_semantic_embedding(enhanced_image)
+        embedding_backend = self._last_embedding_backend
+        embedding_model = self._last_embedding_model
 
         # 提取颜色直方图
         color_histogram = self._extract_color_histogram(image)
@@ -379,6 +459,8 @@ class ImageFeatureExtractor:
             color_histogram=color_histogram,
             dominant_colors=dominant_colors,
             metadata=metadata,
+            embedding_backend=embedding_backend,
+            embedding_model=embedding_model,
             texture_features=texture_features,
             edge_features=edge_features
         )
@@ -398,12 +480,16 @@ class ImageFeatureExtractor:
 
                 # 使用CLIP编码图像
                 embedding = self.image_model.encode(pil_image)
-                return embedding
+                self._last_embedding_backend = "clip_image"
+                self._last_embedding_model = self.image_embedding_model
+                return np.asarray(embedding, dtype=np.float32)
             except Exception as e:
                 logger.error(f"语义特征提取失败: {e}")
                 print(f"语义特征提取失败: {e}")
 
         # 回退到传统特征
+        self._last_embedding_backend = "traditional"
+        self._last_embedding_model = "traditional"
         return self._extract_traditional_features(image)
 
     def _extract_texture_features(self, image: np.ndarray) -> np.ndarray:
@@ -605,6 +691,7 @@ class ImageIndexDatabase:
         self.db_path = db_path
         self.collection = None
         self.feature_extractor = ImageFeatureExtractor()
+        self._text_index_backend_checked = False
 
         self._init_database()
 
@@ -674,6 +761,8 @@ class ImageIndexDatabase:
         metadata = {
             "path": image_path,
             "group": group,
+            "embedding_backend": features.embedding_backend,
+            "embedding_model": features.embedding_model,
             "color_histogram": json.dumps(features.color_histogram.tolist()),
             "dominant_colors": json.dumps(features.dominant_colors),
             # 新增特征存储
@@ -723,6 +812,9 @@ class ImageIndexDatabase:
         if self.feature_extractor.model is None:
             print("警告: CLIP模型未加载，无法重建语义索引")
             return 0
+        if self.feature_extractor.image_model is None:
+            print("警告: CLIP图像编码器未加载，无法重建文本语义索引")
+            return 0
 
         # 获取所有现有图片
         all_images = []
@@ -769,6 +861,8 @@ class ImageIndexDatabase:
                         "path": img_info["path"],
                         "group": img_info["group"],
                         "name": img_info["name"],
+                        "embedding_backend": features.embedding_backend,
+                        "embedding_model": features.embedding_model,
                         "color_histogram": json.dumps(features.color_histogram.tolist()),
                         "dominant_colors": json.dumps(features.dominant_colors),
                         # 新增特征存储
@@ -871,6 +965,59 @@ class ImageIndexDatabase:
 
         return results
 
+    def _is_searchable_image_metadata(self, image_id: str, metadata: Optional[Dict]) -> bool:
+        """判断一条 Chroma 记录是否是真实图片记录。"""
+        metadata = metadata or {}
+        if image_id.startswith("__group__"):
+            return False
+        if metadata.get("__is_group_marker__") == "true":
+            return False
+        if not metadata.get("path"):
+            return False
+        return True
+
+    def _has_text_compatible_embedding(self, metadata: Optional[Dict]) -> bool:
+        """文本 CLIP 查询只能和 CLIP 图像 embedding 比较。"""
+        metadata = metadata or {}
+        return metadata.get("embedding_backend") == "clip_image"
+
+    def _ensure_text_search_embeddings_ready(self) -> bool:
+        """确保文本语义检索不会使用旧版/传统兜底图像向量。"""
+        if self.feature_extractor.image_model is None:
+            print("[搜索] CLIP图像编码器未加载，跳过文本语义搜索")
+            return False
+
+        if self.collection is None:
+            return True
+
+        if getattr(self, "_text_index_backend_checked", False):
+            return True
+
+        self._text_index_backend_checked = True
+
+        try:
+            results = self.collection.get(include=['metadatas'])
+        except Exception as e:
+            logger.debug("检查文本语义索引后端失败: %s", e, exc_info=True)
+            return True
+
+        stale_count = 0
+        if results and results.get('ids'):
+            for i, image_id in enumerate(results['ids']):
+                metadata = results['metadatas'][i] if results.get('metadatas') else {}
+                if not self._is_searchable_image_metadata(image_id, metadata):
+                    continue
+                if not self._has_text_compatible_embedding(metadata):
+                    stale_count += 1
+
+        if stale_count <= 0:
+            return True
+
+        print(f"[搜索] 检测到 {stale_count} 张旧索引缺少CLIP图像语义特征，正在重建...")
+        rebuilt = self.rebuild_all_indexes()
+        print(f"[搜索] 已重建 {rebuilt} 张图片索引")
+        return True
+
     def search_by_text(self, text_query: str, top_k: int = 5,
                       use_multi_feature: bool = True) -> List[Dict[str, Any]]:
         """
@@ -911,7 +1058,7 @@ class ImageIndexDatabase:
         # 语义搜索相似度阈值 (多语言模型可以降低阈值)
         SIMILARITY_THRESHOLD = 0.20 if self.feature_extractor._is_multilingual else 0.23
 
-        if self.feature_extractor.model is not None:
+        if self.feature_extractor.model is not None and self._ensure_text_search_embeddings_ready():
             try:
                 # 多语言模型直接使用原文搜索，否则翻译
                 if self.feature_extractor._is_multilingual:
@@ -942,6 +1089,8 @@ class ImageIndexDatabase:
 
                         metadata = query_results['metadatas'][0][i]
                         if not metadata.get("path"):
+                            continue
+                        if not self._has_text_compatible_embedding(metadata):
                             continue
 
                         distance = query_results['distances'][0][i] if 'distances' in query_results else 0
@@ -988,6 +1137,8 @@ class ImageIndexDatabase:
                     semantic_results = self._memory_search(text_embedding, top_k * 3)
                     for item in semantic_results:
                         if item['id'] not in seen_ids:
+                            if not self._has_text_compatible_embedding(item.get('metadata')):
+                                continue
                             if item.get('similarity', 0) < SIMILARITY_THRESHOLD:
                                 continue
                             seen_ids.add(item['id'])
@@ -1001,7 +1152,10 @@ class ImageIndexDatabase:
                 import traceback
                 traceback.print_exc()
         else:
-            print(f"[搜索] CLIP模型未加载，仅使用名称搜索")
+            if self.feature_extractor.model is not None:
+                print("[搜索] 文本语义搜索不可用，仅使用名称搜索")
+            else:
+                print(f"[搜索] CLIP模型未加载，仅使用名称搜索")
 
         # 按相似度排序后返回
         results.sort(key=lambda x: x.get('similarity', 0), reverse=True)

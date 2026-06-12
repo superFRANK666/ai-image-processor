@@ -136,6 +136,8 @@ class MainWindow(QMainWindow):
 
     # 历史记录最大数量
     MAX_HISTORY = 20
+    _text_params_ready = Signal(object)
+    _text_parse_failed = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -147,6 +149,7 @@ class MainWindow(QMainWindow):
         self.thread: Optional[ProcessingThread] = None
         self._canvas_status = "等待素材"
         self._canvas_detail = "打开或拖入素材开始处理。"
+        self._text_analysis_busy = False
 
         # 历史记录栈（用于撤销功能）
         # 每个记录包含: {'image': np.ndarray, 'params': ColorGradingParams}
@@ -643,6 +646,10 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         """连接信号"""
+        # 文本调色分析可能从后台线程返回，通过主窗口信号回到 UI 线程后再更新控件与应用调色。
+        self._text_params_ready.connect(self._apply_text_color_params, Qt.QueuedConnection)
+        self._text_parse_failed.connect(self._handle_text_parse_error, Qt.QueuedConnection)
+
         # 调色面板信号
         self.color_panel.params_changed.connect(self.apply_color_grading)
         self.color_panel.text_input_submitted.connect(self.process_text_command)
@@ -681,10 +688,16 @@ class MainWindow(QMainWindow):
 
     def _set_compare_checked(self, checked: bool):
         """同步对比按钮状态，避免切换图片时保留旧图对比。"""
-        if hasattr(self.image_viewer, 'compare_btn'):
-            self.image_viewer.compare_btn.blockSignals(True)
-            self.image_viewer.compare_btn.setChecked(checked)
-            self.image_viewer.compare_btn.blockSignals(False)
+        image_viewer = getattr(self, 'image_viewer', None)
+        if image_viewer is not None and hasattr(image_viewer, 'compare_btn'):
+            image_viewer.compare_btn.blockSignals(True)
+            image_viewer.compare_btn.setChecked(checked)
+            image_viewer.compare_btn.blockSignals(False)
+        toolbar_compare = getattr(self, 'compare_btn', None)
+        if toolbar_compare is not None:
+            toolbar_compare.blockSignals(True)
+            toolbar_compare.setChecked(checked)
+            toolbar_compare.blockSignals(False)
         if hasattr(self, 'command_compare_btn'):
             self.command_compare_btn.blockSignals(True)
             self.command_compare_btn.setChecked(checked)
@@ -1007,6 +1020,8 @@ class MainWindow(QMainWindow):
 
     def _set_text_analysis_busy(self, busy: bool):
         """同步文本调色分析的进度条和提交按钮状态。"""
+        self._text_analysis_busy = busy
+
         if busy:
             self.progress_bar.show()
             self.progress_bar.setRange(0, 0)
@@ -1472,6 +1487,10 @@ class MainWindow(QMainWindow):
 
     def process_text_command(self, text: str):
         """处理文本命令（异步）"""
+        if getattr(self, "_text_analysis_busy", False):
+            self.statusbar.showMessage("调色指令正在分析中，请稍候...", 2000)
+            return
+
         if self.original_image is None:
             QMessageBox.warning(self, "提示", "请先加载图像")
             return
@@ -1512,23 +1531,12 @@ class MainWindow(QMainWindow):
                 params.temperature,
                 params.saturation,
             )
-            self._set_text_analysis_busy(False)
-
-            # 更新面板显示
-            self.color_panel.set_params(params)
-
-            # 应用调色
-            self.apply_color_grading(params)
-
-            self.statusbar.showMessage("调色指令已应用", 3000)
+            self._text_params_ready.emit(params)
 
         # 定义错误回调
         def on_parse_error(error_msg: str):
             """解析失败回调"""
-            self._set_text_analysis_busy(False)
-
-            self.statusbar.showMessage(f"分析失败: {error_msg}", 5000)
-            QMessageBox.warning(self, "分析失败", f"无法分析调色指令:\n{error_msg}")
+            self._text_parse_failed.emit(error_msg)
 
         # 异步解析
         self.nlp_parser.parse_async(
@@ -1537,6 +1545,22 @@ class MainWindow(QMainWindow):
             on_error=on_parse_error,
             reference_params=reference_params
         )
+
+    def _apply_text_color_params(self, params):
+        """接收文本调色参数并立即应用到当前图片。"""
+        self._set_text_analysis_busy(False)
+
+        # 回填面板只是为了让用户看到 LLM 给出的参数；图片应用由下一行主动触发。
+        self.color_panel.set_params(params)
+        self.apply_color_grading(params)
+
+        self.statusbar.showMessage("调色指令已应用", 3000)
+
+    def _handle_text_parse_error(self, error_msg: str):
+        """处理文本调色解析失败。"""
+        self._set_text_analysis_busy(False)
+        self.statusbar.showMessage(f"分析失败: {error_msg}", 5000)
+        QMessageBox.warning(self, "分析失败", f"无法分析调色指令:\n{error_msg}")
 
     def _resolve_text_reference_params(self, text: str):
         """按文本意图查找参考图并提取色调参数。"""

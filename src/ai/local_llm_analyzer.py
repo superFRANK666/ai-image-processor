@@ -76,7 +76,8 @@ class LocalLLMColorAnalyzer:
 1. 仔细分析用户描述的含义、主体和色彩特征。
 2. 如果是具体事物（如“太阳”“大海”“胶片海报”），提取典型色相、影调和质感。
 3. 如果描述与调色无关（如单纯菜名、闲聊、文件操作），返回 is_color_related: false。
-4. 返回JSON格式，必须包含字段：is_color_related, reasoning, parameters。
+4. 充分发挥创造力，针对不同语义输出具有多样化组合的参数，绝对避免每次只输出固定的基础参数（如仅调整曝光、对比度等）。如果有必要，大胆使用曲线、局部色彩(HSL)、色轮、特效(如去雾、纹理、柔光)等高级参数，使调色效果更丰富、贴合语义。
+5. 返回JSON格式，必须包含字段：is_color_related, reasoning, parameters。
 
 示例1：
 输入：“青橙电影感，暗部冷一点，高光像夕阳”
@@ -255,6 +256,7 @@ class LocalLLMColorAnalyzer:
             }
 
         try:
+            import torch
             # 构建对话
             messages = [
                 {"role": "system", "content": self.SYSTEM_PROMPT},
@@ -280,9 +282,10 @@ class LocalLLMColorAnalyzer:
                 outputs = self.model.generate(
                     **inputs,
                     max_new_tokens=512,
-                    temperature=0.3,
+                    temperature=0.65,
                     do_sample=True,
                     top_p=0.9,
+                    top_k=50,
                     pad_token_id=self.tokenizer.eos_token_id
                 )
 

@@ -84,6 +84,17 @@ class ParamSlider(QWidget):
 class ColorGradingPanel(QWidget):
     """调色面板"""
 
+    HSL_CHANNELS = (
+        ("red", "红色"),
+        ("orange", "橙色"),
+        ("yellow", "黄色"),
+        ("green", "绿色"),
+        ("aqua", "青色"),
+        ("blue", "蓝色"),
+        ("purple", "紫色"),
+        ("magenta", "品红"),
+    )
+
     params_changed = Signal(object)  # ColorGradingParams
     text_input_submitted = Signal(str)
     find_similar_requested = Signal()
@@ -263,6 +274,27 @@ class ColorGradingPanel(QWidget):
 
         params_layout.addWidget(color_group)
 
+        # HSL 分色
+        hsl_group = QGroupBox("HSL 分色")
+        hsl_layout = QVBoxLayout(hsl_group)
+        self._hsl_param_sliders = []
+
+        for color_key, color_label in self.HSL_CHANNELS:
+            hue_slider = ParamSlider(f"{color_label}色相", -60, 60, 0, 0, "°")
+            saturation_slider = ParamSlider(f"{color_label}饱和", -100, 100, 0, 0)
+            luminance_slider = ParamSlider(f"{color_label}明度", -100, 100, 0, 0)
+
+            setattr(self, f"{color_key}_hue_slider", hue_slider)
+            setattr(self, f"{color_key}_saturation_slider", saturation_slider)
+            setattr(self, f"{color_key}_luminance_slider", luminance_slider)
+
+            hsl_layout.addWidget(hue_slider)
+            hsl_layout.addWidget(saturation_slider)
+            hsl_layout.addWidget(luminance_slider)
+            self._hsl_param_sliders.extend([hue_slider, saturation_slider, luminance_slider])
+
+        params_layout.addWidget(hsl_group)
+
         # 曲线
         curve_group = QGroupBox("参数曲线")
         curve_layout = QVBoxLayout(curve_group)
@@ -382,6 +414,7 @@ class ColorGradingPanel(QWidget):
             self.red_balance_slider,
             self.green_balance_slider,
             self.blue_balance_slider,
+            *self._hsl_param_sliders,
             self.curve_shadows_slider,
             self.curve_darks_slider,
             self.curve_lights_slider,
@@ -433,6 +466,8 @@ class ColorGradingPanel(QWidget):
         self.red_balance_slider.value_changed.connect(self._on_param_changed)
         self.green_balance_slider.value_changed.connect(self._on_param_changed)
         self.blue_balance_slider.value_changed.connect(self._on_param_changed)
+        for slider in self._hsl_param_sliders:
+            slider.value_changed.connect(self._on_param_changed)
         self.curve_shadows_slider.value_changed.connect(self._on_param_changed)
         self.curve_darks_slider.value_changed.connect(self._on_param_changed)
         self.curve_lights_slider.value_changed.connect(self._on_param_changed)
@@ -526,6 +561,12 @@ class ColorGradingPanel(QWidget):
             "grain": self.grain_slider.get_value(),
             "fade": self.fade_slider.get_value(),
         })
+        for color_key, _ in self.HSL_CHANNELS:
+            params.update({
+                f"{color_key}_hue": getattr(self, f"{color_key}_hue_slider").get_value(),
+                f"{color_key}_saturation": getattr(self, f"{color_key}_saturation_slider").get_value(),
+                f"{color_key}_luminance": getattr(self, f"{color_key}_luminance_slider").get_value(),
+            })
         return ColorGradingParams.from_dict(params)
 
     def set_params(self, params: ColorGradingParams):
@@ -553,6 +594,10 @@ class ColorGradingPanel(QWidget):
         self.red_balance_slider.set_value(params.red_balance)
         self.green_balance_slider.set_value(params.green_balance)
         self.blue_balance_slider.set_value(params.blue_balance)
+        for color_key, _ in self.HSL_CHANNELS:
+            getattr(self, f"{color_key}_hue_slider").set_value(getattr(params, f"{color_key}_hue"))
+            getattr(self, f"{color_key}_saturation_slider").set_value(getattr(params, f"{color_key}_saturation"))
+            getattr(self, f"{color_key}_luminance_slider").set_value(getattr(params, f"{color_key}_luminance"))
         self.curve_shadows_slider.set_value(params.curve_shadows)
         self.curve_darks_slider.set_value(params.curve_darks)
         self.curve_lights_slider.set_value(params.curve_lights)

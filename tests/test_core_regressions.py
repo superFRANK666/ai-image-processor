@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -44,6 +45,20 @@ class FakeSentenceTransformer:
 
     def get_sentence_embedding_dimension(self):
         return 3
+
+    def encode(self, inputs):
+        return np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+
+class FakeNewApiSentenceTransformer:
+    def __init__(self, model_path):
+        self.model_path = model_path
+
+    def get_embedding_dimension(self):
+        return 3
+
+    def get_sentence_embedding_dimension(self):
+        raise AssertionError("legacy embedding dimension API should not be used")
 
     def encode(self, inputs):
         return np.array([1.0, 0.0, 0.0], dtype=np.float32)
@@ -176,6 +191,75 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertGreater(cinematic.shadow_saturation, 0)
         self.assertGreater(cinematic.highlight_saturation, 0)
 
+    def test_traditional_parser_maps_direct_color_words(self):
+        from src.ai.nlp_color_parser import NLPColorParser
+
+        parser = object.__new__(NLPColorParser)
+        parser.text_encoder = None
+        parser.use_llm = False
+        parser.llm_analyzer = None
+
+        golden = parser._traditional_parse("金黄色", "金黄色")
+        deep_green = parser._traditional_parse("深绿色", "深绿色")
+
+        self.assertGreater(golden.yellow_saturation, 0)
+        self.assertGreater(golden.highlight_saturation, 0)
+        self.assertGreater(deep_green.green_saturation, 0)
+        self.assertLess(deep_green.green_luminance, 0)
+        self.assertGreater(deep_green.midtone_saturation, 0)
+
+    def test_async_llm_default_result_falls_back_to_traditional_color(self):
+        from src.ai.nlp_color_parser import NLPColorParser
+
+        class FakeAsyncLLM:
+            def analyze_async(self, _text, on_success=None, on_error=None):
+                if on_success:
+                    on_success({
+                        "is_color_related": True,
+                        "reasoning": "模型识别为调色，但没有产出有效参数",
+                        "parameters": {},
+                    })
+
+        parser = object.__new__(NLPColorParser)
+        parser.text_encoder = None
+        parser.use_llm = True
+        parser.llm_analyzer = FakeAsyncLLM()
+        results = []
+
+        parser.parse_async("深绿色", on_success=results.append)
+
+        self.assertEqual(len(results), 1)
+        self.assertGreater(results[0].green_saturation, 0)
+        self.assertLess(results[0].green_luminance, 0)
+
+    def test_builtin_color_presets_fit_current_rich_parameter_schema(self):
+        from src.core.config import COLOR_PRESETS
+
+        valid_fields = set(ColorGradingParams.__dataclass_fields__)
+        rich_fields = {
+            "red_hue", "red_saturation", "red_luminance",
+            "orange_hue", "orange_saturation", "orange_luminance",
+            "yellow_hue", "yellow_saturation", "yellow_luminance",
+            "green_hue", "green_saturation", "green_luminance",
+            "aqua_hue", "aqua_saturation", "aqua_luminance",
+            "blue_hue", "blue_saturation", "blue_luminance",
+            "purple_hue", "purple_saturation", "purple_luminance",
+            "magenta_hue", "magenta_saturation", "magenta_luminance",
+            "shadow_hue", "shadow_saturation",
+            "midtone_hue", "midtone_saturation",
+            "highlight_hue", "highlight_saturation",
+            "curve_shadows", "curve_darks", "curve_lights", "curve_highlights",
+            "red_balance", "green_balance", "blue_balance",
+            "cdl_slope", "cdl_offset", "cdl_power", "cdl_saturation",
+            "texture", "midtone_detail", "dehaze", "bloom", "vignette", "grain", "fade",
+        }
+
+        for name, params in COLOR_PRESETS.items():
+            with self.subTest(name=name):
+                self.assertFalse(set(params) - valid_fields)
+                self.assertTrue(set(params) & rich_fields)
+                ColorGradingParams.from_dict(params)
+
     def test_grid_mesh_shape_and_first_faces(self):
         faces = GeometryUtils.create_grid_mesh(4, 3)
 
@@ -209,6 +293,96 @@ class CoreRegressionTests(unittest.TestCase):
                 os.environ.pop("TRANSFORMERS_OFFLINE", None)
             else:
                 os.environ["TRANSFORMERS_OFFLINE"] = original_transformers
+
+    def test_clip_model_init_prefers_current_embedding_dimension_api(self):
+        original_cls = image_retrieval_module.SentenceTransformer
+        image_retrieval_module.SentenceTransformer = FakeNewApiSentenceTransformer
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                extractor = ImageFeatureExtractor(local_model_path=tmp)
+                extractor._init_model()
+
+            self.assertEqual(extractor.embedding_dim, 3)
+            self.assertIs(extractor.image_model, extractor.model)
+            self.assertEqual(extractor.image_embedding_backend, "clip_image")
+        finally:
+            image_retrieval_module.SentenceTransformer = original_cls
+
+    def test_text_search_skips_semantic_without_clip_image_encoder(self):
+        class FakeCollection:
+            def __init__(self):
+                self.query_calls = 0
+
+            def get(self, include=None):
+                return {
+                    "ids": ["image-a"],
+                    "metadatas": [{
+                        "path": "white-id-photo.png",
+                        "dominant_colors": json.dumps([[255, 255, 255]]),
+                        "brightness": 250,
+                        "contrast": 10,
+                    }],
+                }
+
+            def query(self, *args, **kwargs):
+                self.query_calls += 1
+                return {"ids": [[]], "metadatas": [[]], "distances": [[]]}
+
+        db = object.__new__(ImageIndexDatabase)
+        db.collection = FakeCollection()
+        db.feature_extractor = SimpleNamespace(
+            model=FakeClipModel(),
+            image_model=None,
+            _model_init_attempted=True,
+            _is_multilingual=True,
+        )
+        db._text_index_backend_checked = False
+
+        results = ImageIndexDatabase.search_by_text(db, "复刻去年海边旅行的蓝色色调", top_k=1)
+
+        self.assertEqual(results, [])
+        self.assertEqual(db.collection.query_calls, 0)
+
+    def test_text_search_filters_legacy_embedding_candidates(self):
+        legacy_metadata = {
+            "path": "white-id-photo.png",
+            "dominant_colors": json.dumps([[255, 255, 255]]),
+            "brightness": 250,
+            "contrast": 10,
+        }
+
+        class FakeCollection:
+            def __init__(self):
+                self.query_calls = 0
+
+            def get(self, include=None):
+                return {"ids": ["image-a"], "metadatas": [legacy_metadata]}
+
+            def query(self, *args, **kwargs):
+                self.query_calls += 1
+                return {
+                    "ids": [["image-a"]],
+                    "metadatas": [[legacy_metadata]],
+                    "distances": [[0.01]],
+                    "embeddings": [[[1.0, 0.0, 0.0]]],
+                }
+
+        db = object.__new__(ImageIndexDatabase)
+        db.collection = FakeCollection()
+        db.feature_extractor = SimpleNamespace(
+            model=FakeClipModel(),
+            image_model=object(),
+            _model_init_attempted=True,
+            _is_multilingual=True,
+        )
+        db._text_index_backend_checked = False
+        db.rebuild_all_indexes = lambda: 0
+
+        results = ImageIndexDatabase.search_by_text(db, "复刻去年海边旅行的蓝色色调", top_k=1)
+
+        self.assertEqual(results, [])
+        self.assertEqual(db.collection.query_calls, 1)
 
     def test_memory_index_filters_group_markers_consistently(self):
         db = object.__new__(ImageIndexDatabase)

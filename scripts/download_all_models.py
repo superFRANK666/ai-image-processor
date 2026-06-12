@@ -7,8 +7,9 @@
 2. NLP理解模型 (paraphrase-multilingual-MiniLM-L12-v2)
 3. 深度估计模型 (depth-anything-small)
 4. MobileSAM 分割模型
-5. CLIP 多语言图像检索模型
-6. SAM2 高精度分割模型 (可选)
+5. CLIP 多语言文本检索模型
+6. CLIP 图像编码器
+7. SAM2 高精度分割模型 (可选)
 """
 import os
 import sys
@@ -372,12 +373,13 @@ print("  [必需] 2. NLP理解模型 (~471MB)")
 print("  [必需] 3. 深度估计模型 (~99MB)")
 print("  [必需] 4. MobileSAM分割模型 (~40MB)")
 print("  [必需] 5. CLIP多语言模型 (~540MB)")
-print("  [可选] 6. SAM2高精度分割 (~155MB)")
+print("  [必需] 6. CLIP图像编码器 (~600MB)")
+print("  [可选] 7. SAM2高精度分割 (~155MB)")
 print("\n⏱️  预计总下载时间: 10-30分钟 (取决于网络速度)")
 print("=" * 80)
 
 # 下载进度统计
-total_models = 6
+total_models = 7
 downloaded_models = 0
 failed_models = []
 
@@ -533,7 +535,7 @@ except Exception as e:
 
 # 5. 下载多语言CLIP模型
 print("\n" + "=" * 80)
-print("[5/6] 下载多语言CLIP模型 (约540MB)...")
+print("[5/7] 下载多语言CLIP模型 (约540MB)...")
 print("=" * 80)
 try:
     from sentence_transformers import SentenceTransformer
@@ -551,9 +553,29 @@ except Exception as e:
     print(f"  ✗ 下载失败: {e}")
     failed_models.append(("CLIP多语言模型", str(e)))
 
-# 6. 下载SAM2高精度分割模型 (可选)
+# 6. 下载原始CLIP图像编码器
 print("\n" + "=" * 80)
-print("[6/6] 下载SAM2高精度分割模型 (约155MB, 可选)...")
+print("[6/7] 下载CLIP图像编码器 (约600MB)...")
+print("=" * 80)
+try:
+    from sentence_transformers import SentenceTransformer
+    model_name = "sentence-transformers/clip-ViT-B-32"
+    save_path = MODELS_DIR / "clip-ViT-B-32"
+    if save_path.exists():
+        print("  ✓ 模型已存在,跳过")
+        downloaded_models += 1
+    else:
+        model = SentenceTransformer(model_name)
+        model.save(str(save_path))
+        print(f"  ✓ 下载完成: {save_path}")
+        downloaded_models += 1
+except Exception as e:
+    print(f"  ✗ 下载失败: {e}")
+    failed_models.append(("CLIP图像编码器", str(e)))
+
+# 7. 下载SAM2高精度分割模型 (可选)
+print("\n" + "=" * 80)
+print("[7/7] 下载SAM2高精度分割模型 (约155MB, 可选)...")
 print("=" * 80)
 print("提示: SAM2精度比MobileSAM高15-20%，但速度略慢")
 user_input = prompt_input("是否下载? (y/n, 默认y): ").strip().lower()
@@ -594,6 +616,7 @@ if user_input != 'n':
             os.environ['HF_ENDPOINT'] = original_endpoint
 else:
     print("  ⊘ 跳过 SAM2模型下载")
+    total_models -= 1
 
 # 最终统计
 print("\n" + "=" * 80)

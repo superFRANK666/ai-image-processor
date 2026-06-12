@@ -175,6 +175,16 @@ class FakeParser:
         self.calls.append((args, kwargs))
 
 
+class FakeEmitter:
+    def __init__(self, callback):
+        self.callback = callback
+        self.emitted = []
+
+    def emit(self, *args):
+        self.emitted.append(args)
+        self.callback(*args)
+
+
 @unittest.skipUnless(QApplication is not None, "PySide6 is not available")
 class ColorPanelRegressionTests(unittest.TestCase):
     @classmethod
@@ -406,6 +416,15 @@ class ColorPanelRegressionTests(unittest.TestCase):
         self.assertEqual(params.orange_luminance, 12)
         self.assertEqual(params.shadow_hue, 195)
         self.assertEqual(params.shadow_saturation, 24)
+        self.assertEqual(panel.blue_saturation_slider.get_value(), 34)
+        self.assertEqual(panel.orange_luminance_slider.get_value(), 12)
+
+        panel.green_saturation_slider.set_value(28)
+        panel.yellow_luminance_slider.set_value(-6)
+        params = panel.get_params()
+
+        self.assertEqual(params.green_saturation, 28)
+        self.assertEqual(params.yellow_luminance, -6)
 
     def test_thumbnail_size_never_rounds_down_to_zero(self):
         from src.ui.ui_utils import fit_thumbnail_size, fit_within_size
@@ -1335,6 +1354,51 @@ class ColorPanelRegressionTests(unittest.TestCase):
             fake_window.statusbar.messages[-1],
             ("参考图片分析失败: index offline", 5000),
         )
+
+    def test_text_command_success_auto_applies_llm_params(self):
+        from src.ai.color_params import ColorGradingParams
+        from src.ui.main_window import MainWindow
+
+        parser = FakeParser()
+        progress_bar = FakeProgressBar()
+        color_panel = FakeColorPanel()
+        applied = []
+        fake_window = SimpleNamespace(
+            original_image=np.zeros((2, 2, 3), dtype=np.uint8),
+            progress_bar=progress_bar,
+            statusbar=FakeStatusBar(),
+            color_panel=color_panel,
+            nlp_parser=parser,
+            color_engine=object(),
+            image_db=FakeLibraryDb([]),
+            _ensure_model=lambda _name: True,
+            _resolve_text_reference_params=lambda _text: None,
+            apply_color_grading=lambda params: applied.append(params),
+        )
+        fake_window._set_text_analysis_busy = (
+            lambda busy: MainWindow._set_text_analysis_busy(fake_window, busy)
+        )
+        fake_window._text_params_ready = FakeEmitter(
+            lambda params: MainWindow._apply_text_color_params(fake_window, params)
+        )
+
+        MainWindow.process_text_command(fake_window, "青橙电影感")
+
+        self.assertEqual(len(parser.calls), 1)
+        self.assertTrue(progress_bar.shown)
+        args, kwargs = parser.calls[0]
+        self.assertEqual(args[0], "青橙电影感")
+
+        params = ColorGradingParams(exposure=0.25, contrast=1.18, temperature=12)
+        kwargs["on_success"](params)
+
+        self.assertEqual(fake_window._text_params_ready.emitted, [(params,)])
+        self.assertIs(color_panel.params, params)
+        self.assertEqual(applied, [params])
+        self.assertTrue(progress_bar.hidden)
+        self.assertTrue(color_panel.apply_btn.enabled)
+        self.assertEqual(color_panel.apply_btn.text, "应用")
+        self.assertEqual(fake_window.statusbar.messages[-1], ("调色指令已应用", 3000))
 
 
 if __name__ == "__main__":

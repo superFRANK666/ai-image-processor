@@ -572,19 +572,6 @@ class AGICameraPanel(QWidget):
         axis_layout.addWidget(self.axis_combo)
         params_layout.addLayout(axis_layout)
 
-        # 帧数
-        frames_layout = QHBoxLayout()
-        frames_label = QLabel("动画帧数:")
-        frames_label.setFixedWidth(80)
-        frames_layout.addWidget(frames_label)
-        self.frames_spin = QSpinBox()
-        self.frames_spin.setRange(30, 120)
-        self.frames_spin.setValue(60)
-        self.frames_spin.installEventFilter(self._wheel_blocker)
-        frames_layout.addWidget(self.frames_spin)
-        frames_layout.addStretch()
-        params_layout.addLayout(frames_layout)
-
         layout.addWidget(params_group)
 
         # 多视角重建区域
@@ -847,7 +834,6 @@ class AGICameraPanel(QWidget):
             "depth_scale": self.depth_slider.value() / 100.0,
             "resolution": int(self.resolution_combo.currentText()),
             "axis": axis_map.get(self.axis_combo.currentText(), "y"),
-            "frames": self.frames_spin.value()
         }
 
     def _on_generate_3d(self):
