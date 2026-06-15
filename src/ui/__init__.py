@@ -1,12 +1,8 @@
 """
 UI模块初始化
-使用延迟导入优化启动速度
+使用延迟导入优化启动速度 — 所有成员均按需导入
 """
 
-# 主函数直接导入（启动必需）
-from .main_window import main
-
-# 其他组件延迟导入（仅在需要时导入）
 __all__ = [
     'main',
     'MainWindow',
@@ -20,10 +16,14 @@ __all__ = [
 
 
 def __getattr__(name):
-    """延迟导入机制"""
-    if name == 'MainWindow':
-        from .main_window import MainWindow
-        return MainWindow
+    """延迟导入机制 — 任何成员均在首次访问时才导入"""
+    if name in ('main', 'MainWindow'):
+        from .main_window import MainWindow, main
+        # 缓存到模块命名空间，避免重复触发 __getattr__
+        import src.ui as _mod
+        _mod.MainWindow = MainWindow
+        _mod.main = main
+        return MainWindow if name == 'MainWindow' else main
     elif name == 'ImageViewer':
         from .image_viewer import ImageViewer
         return ImageViewer
@@ -43,4 +43,3 @@ def __getattr__(name):
         from .style_sheet import get_light_style
         return get_light_style
     raise AttributeError(f"模块 'ui' 中没有属性 '{name}'")
-

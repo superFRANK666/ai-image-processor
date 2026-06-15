@@ -2,26 +2,32 @@
   "_comment": "LLM配置文件示例 - 包含多种配置方案",
   "_instructions": [
     "将下面的某个配置复制到 llm_config.json 文件中使用",
-    "根据您的硬件情况选择合适的配置",
+    "根据您的硬件情况或API服务选择合适的配置",
     "建议:",
+    "  - 想免下载本地LLM: 使用OpenAI/Anthropic/OpenAI兼容API配置",
     "  - 8GB显存以下: 使用1.5B模型或4-bit量化的7B模型",
     "  - 8-16GB显存: 使用7B模型(4-bit量化)或3B模型",
     "  - 16GB+显存: 使用7B模型(8-bit量化)或14B模型(4-bit)"
   ],
   "示例1_最小配置_1.5B模型": {
     "enabled": true,
+    "provider": "local",
     "model_name": "Qwen/Qwen2.5-1.5B-Instruct",
-    "device": "auto"
+    "device": "auto",
+    "trust_remote_code": false
   },
   "示例2_3B模型_无量化": {
     "enabled": true,
+    "provider": "local",
     "model_name": "Qwen/Qwen2.5-3B-Instruct",
     "device": "auto"
   },
   "示例3_7B模型_4bit量化_推荐": {
     "enabled": true,
+    "provider": "local",
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
     "device": "auto",
+    "trust_remote_code": false,
     "quantization": {
       "enabled": true,
       "bits": 4,
@@ -30,6 +36,7 @@
   },
   "示例4_7B模型_8bit量化": {
     "enabled": true,
+    "provider": "local",
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
     "device": "auto",
     "quantization": {
@@ -40,6 +47,7 @@
   },
   "示例5_14B模型_4bit量化": {
     "enabled": true,
+    "provider": "local",
     "model_name": "Qwen/Qwen2.5-14B-Instruct",
     "device": "auto",
     "quantization": {
@@ -54,6 +62,7 @@
   },
   "示例6_32B模型_4bit量化_大显存": {
     "enabled": true,
+    "provider": "local",
     "model_name": "Qwen/Qwen2.5-32B-Instruct",
     "device": "auto",
     "quantization": {
@@ -69,8 +78,10 @@
   },
   "示例7_本地模型路径": {
     "enabled": true,
+    "provider": "local",
     "model_name": "/path/to/models/Qwen2.5-7B-Instruct",
     "device": "cuda",
+    "trust_remote_code": false,
     "quantization": {
       "enabled": true,
       "bits": 4,
@@ -79,16 +90,59 @@
   },
   "示例8_CPU运行_仅供测试": {
     "enabled": true,
+    "provider": "local",
     "model_name": "Qwen/Qwen2.5-1.5B-Instruct",
-    "device": "cpu"
+    "device": "cpu",
+    "trust_remote_code": false
   },
-  "示例9_禁用LLM_使用关键词匹配": {
+  "示例9_OpenAI_API": {
+    "enabled": true,
+    "provider": "openai",
+    "model": "",
+    "base_url": "https://api.openai.com/v1",
+    "timeout": 30,
+    "temperature": 0.65,
+    "max_tokens": 512
+  },
+  "示例10_Anthropic_API": {
+    "enabled": true,
+    "provider": "anthropic",
+    "model": "",
+    "base_url": "https://api.anthropic.com",
+    "timeout": 30,
+    "temperature": 0.65,
+    "max_tokens": 512
+  },
+  "示例11_OpenAI兼容API_本地或第三方网关": {
+    "enabled": true,
+    "provider": "openai-compatible",
+    "model": "",
+    "base_url": "",
+    "api_key_required": false,
+    "timeout": 30,
+    "temperature": 0.65,
+    "max_tokens": 512
+  },
+  "示例12_禁用LLM_使用关键词匹配": {
     "enabled": false
   },
   "_参数说明": {
     "enabled": "是否启用LLM功能，false时使用传统关键词匹配",
-    "model_name": "模型名称(HuggingFace格式)或本地路径",
-    "device": "设备选择: auto(自动), cuda(GPU), cpu(CPU)",
+    "provider": "后端类型: local(本地Transformers), openai, anthropic, openai-compatible",
+    "model_name": "本地模型名称(HuggingFace格式)或本地路径；旧配置未写provider时默认local",
+    "model": "API模型名称，由对应服务商或OpenAI兼容网关定义；模型配置窗口默认留空，需要手动填写",
+    "api_key": "可选，直接写入API Key；不推荐提交或共享。留空时使用服务商默认环境变量",
+    "api_key_required": "OpenAI兼容本地网关无需密钥时可设为false",
+    "base_url": "API基础地址；OpenAI兼容配置默认留空，需要手动填写",
+    "endpoint": "可选，自定义API路径或完整URL；不填时使用对应provider默认路径",
+    "timeout": "API请求超时时间(秒)",
+    "temperature": "生成随机性，null表示不发送该字段",
+    "max_tokens": "最大输出token数，null表示不发送该字段(OpenAI兼容)或使用默认值(Anthropic)",
+    "headers": "可选，自定义请求头",
+    "response_format": "可选，OpenAI格式的响应格式配置",
+    "extra_body": "可选，合并到请求JSON中的附加字段，例如top_p",
+    "device": "本地模型设备选择: auto(自动), cuda(GPU), cpu(CPU)",
+    "trust_remote_code": "本地模型是否允许运行模型仓库自定义代码，默认false；仅在完全信任模型来源时开启",
     "quantization": {
       "enabled": "是否启用量化",
       "bits": "量化位数: 4(占用更少显存) 或 8(精度更高)",

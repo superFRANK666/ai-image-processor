@@ -193,11 +193,6 @@ def generate_checksums(model_dir: Path, file_patterns: Optional[list] = None):
 
 # 已知模型的SHA256校验和（由社区维护）
 KNOWN_MODEL_CHECKSUMS = {
-    "mobile_sam.pt": {
-        "sha256": "f3c0d8cda613564d499310dab6c812cd80d9de20dd0e7d7b3ea0cd86ff5c76d6",
-        "size_mb": 39.0,
-        "source": "官方发布"
-    },
     # 可以添加更多已知模型的校验和
 }
 

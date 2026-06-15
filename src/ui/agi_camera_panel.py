@@ -3,26 +3,28 @@ AGI相机面板
 3D生成和动画预览
 支持物体选择
 """
+import logging
 import numpy as np
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QSlider, QComboBox, QSpinBox, QDoubleSpinBox,
     QFrame, QProgressBar, QFileDialog, QCheckBox, QSizePolicy,
-    QScrollArea
+    QScrollArea, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QEvent
 from PySide6.QtGui import QPixmap, QImage, QMouseEvent, QPainter, QColor, QPen
 import cv2
 
-import sys
-from pathlib import Path
-# 使用相对导入
-from ..ai import Mesh3D
-from .ui_utils import WheelBlocker
+from .ui_utils import WheelBlocker, fit_thumbnail_size, fit_within_size
 from .image_picker_dialog import pick_images
 
+if TYPE_CHECKING:
+    from ..ai import Mesh3D
+
+
+logger = logging.getLogger(__name__)
 
 
 class ClickableImageLabel(QWidget):
@@ -36,7 +38,7 @@ class ClickableImageLabel(QWidget):
         super().__init__()
         self.setMinimumSize(400, 350)  # 增大最小尺寸以便精准选择
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 允许扩展
-        self.setStyleSheet("background: #1a1a1a; border: 1px solid #404040;")
+        self.setObjectName("selectionViewport")
 
         # 启用鼠标追踪
         self.setMouseTracking(True)
@@ -91,11 +93,8 @@ class ClickableImageLabel(QWidget):
         if max_w <= 0 or max_h <= 0:
             return
 
-        scale = min(max_w / w, max_h / h)
-        self._display_scale = scale
-
-        new_w = int(w * scale)
-        new_h = int(h * scale)
+        new_w, new_h = fit_within_size(w, h, max_w, max_h)
+        self._display_scale = min(new_w / w, new_h / h)
 
         self._offset_x = (self.width() - new_w) // 2
         self._offset_y = (self.height() - new_h) // 2
@@ -104,16 +103,19 @@ class ClickableImageLabel(QWidget):
 
         # 如果正在绘制框选
         if self._drawing_box and self._box_start and self._box_end:
-            x1 = int(self._box_start[0] * scale)
-            y1 = int(self._box_start[1] * scale)
-            x2 = int(self._box_end[0] * scale)
-            y2 = int(self._box_end[1] * scale)
+            x1 = int(self._box_start[0] * self._display_scale)
+            y1 = int(self._box_start[1] * self._display_scale)
+            x2 = int(self._box_end[0] * self._display_scale)
+            y2 = int(self._box_end[1] * self._display_scale)
             cv2.rectangle(display_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
         # 如果正在绘制划线路径
         if self._drawing_path and len(self._path_img_points) > 1:
             # 将图像坐标的路径点转换为显示坐标
-            scaled_points = [(int(p[0] * scale), int(p[1] * scale)) for p in self._path_img_points]
+            scaled_points = [
+                (int(p[0] * self._display_scale), int(p[1] * self._display_scale))
+                for p in self._path_img_points
+            ]
             # 绘制路径
             for i in range(len(scaled_points) - 1):
                 cv2.line(display_image, scaled_points[i], scaled_points[i+1], (0, 255, 255), 3)
@@ -156,7 +158,7 @@ class ClickableImageLabel(QWidget):
         """鼠标按下事件"""
         if event.button() == Qt.LeftButton:
             if self._image is None:
-                print("[ClickableImageLabel] 图像未加载，忽略点击")
+                logger.debug("[ClickableImageLabel] 图像未加载，忽略点击")
                 return
 
             screen_x, screen_y = event.pos().x(), event.pos().y()
@@ -167,7 +169,10 @@ class ClickableImageLabel(QWidget):
             self._press_img_pos = (img_x, img_y)
             self._is_dragging = False
 
-            print(f"[ClickableImageLabel] 鼠标按下: 屏幕({screen_x}, {screen_y}), 图像({img_x}, {img_y}), 模式: {self._selection_mode}")
+            logger.debug(
+                "[ClickableImageLabel] 鼠标按下: 屏幕(%s, %s), 图像(%s, %s), 模式: %s",
+                screen_x, screen_y, img_x, img_y, self._selection_mode
+            )
 
             # 如果是框选模式，准备框选
             if self._selection_mode == "box":
@@ -227,7 +232,10 @@ class ClickableImageLabel(QWidget):
         screen_x, screen_y = event.pos().x(), event.pos().y()
         img_x, img_y = self._screen_to_image_coords(screen_x, screen_y)
 
-        print(f"[ClickableImageLabel] 鼠标释放: 模式={self._selection_mode}, 拖动={self._is_dragging}")
+        logger.debug(
+            "[ClickableImageLabel] 鼠标释放: 模式=%s, 拖动=%s",
+            self._selection_mode, self._is_dragging
+        )
 
         if self._selection_mode == "box" and self._drawing_box:
             # 框选模式：发送框选信号
@@ -242,10 +250,13 @@ class ClickableImageLabel(QWidget):
                 y1, y2 = min(y1, y2), max(y1, y2)
                 # 只有当框选区域足够大时才发送信号
                 if abs(x2 - x1) > 5 and abs(y2 - y1) > 5:
-                    print(f"[ClickableImageLabel] 发送框选信号: ({x1}, {y1}) - ({x2}, {y2})")
+                    logger.debug(
+                        "[ClickableImageLabel] 发送框选信号: (%s, %s) - (%s, %s)",
+                        x1, y1, x2, y2
+                    )
                     self.box_selected.emit(x1, y1, x2, y2)
                 else:
-                    print("[ClickableImageLabel] 框选区域太小，忽略")
+                    logger.debug("[ClickableImageLabel] 框选区域太小，忽略")
 
             self._update_display()
 
@@ -255,10 +266,13 @@ class ClickableImageLabel(QWidget):
 
             if len(self._path_img_points) > 2:
                 # 闭合路径（自动连接起点和终点）
-                print(f"[ClickableImageLabel] 发送划线路径信号: {len(self._path_img_points)} 个点")
+                logger.debug(
+                    "[ClickableImageLabel] 发送划线路径信号: %s 个点",
+                    len(self._path_img_points)
+                )
                 self.path_selected.emit(self._path_img_points.copy())
             else:
-                print("[ClickableImageLabel] 划线路径点太少，忽略")
+                logger.debug("[ClickableImageLabel] 划线路径点太少，忽略")
 
             # 清除路径显示
             self._path_points = []
@@ -269,7 +283,7 @@ class ClickableImageLabel(QWidget):
             # 点选模式：发送点选信号
             if self._press_img_pos and not self._is_dragging:
                 x, y = self._press_img_pos
-                print(f"[ClickableImageLabel] 发送点选信号: ({x}, {y})")
+                logger.debug("[ClickableImageLabel] 发送点选信号: (%s, %s)", x, y)
                 self.clicked.emit(x, y)
 
         # 重置状态
@@ -290,15 +304,19 @@ class ClickableImageLabel(QWidget):
 class AnimationPreview(QLabel):
     """动画预览组件"""
 
+    PLAYBACK_BASE_FPS = 30
+
     def __init__(self):
         super().__init__()
+        self.setObjectName("animationPreview")
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(400, 350)  # 增大最小尺寸以便完整预览
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 允许扩展
-        self.setStyleSheet("background: #1a1a1a; border: 1px solid #404040;")
 
         self._frames: List[np.ndarray] = []
         self._current_frame = 0
+        self._playback_position = 0.0
+        self._frame_step = 1.0
         self._playing = False
 
         self._timer = QTimer()
@@ -310,8 +328,12 @@ class AnimationPreview(QLabel):
         """设置动画帧"""
         self._frames = frames
         self._current_frame = 0
+        self._playback_position = 0.0
         if frames:
             self._show_frame(0)
+        else:
+            self.clear()
+            self.setText("预览区域\n生成3D模型后可在此查看")
 
     def _show_frame(self, index: int):
         """显示指定帧"""
@@ -325,8 +347,7 @@ class AnimationPreview(QLabel):
         max_size = min(self.width() - 10, self.height() - 10)
         if max_size <= 0:
             max_size = 100
-        scale = max_size / max(h, w)
-        new_w, new_h = int(w * scale), int(h * scale)
+        new_w, new_h = fit_thumbnail_size(w, h, max_size)
         frame = cv2.resize(frame, (new_w, new_h))
 
         # 转换为QPixmap - 确保数据独立拷贝避免悬垂指针
@@ -345,14 +366,22 @@ class AnimationPreview(QLabel):
         if not self._frames:
             return
 
-        self._current_frame = (self._current_frame + 1) % len(self._frames)
+        self._playback_position = (self._playback_position + self._frame_step) % len(self._frames)
+        self._current_frame = int(self._playback_position) % len(self._frames)
         self._show_frame(self._current_frame)
+
+    def _set_preview_refresh_rate(self, fps: int):
+        """设置预览刷新率，同时保持固定旋转速度。"""
+        safe_fps = max(1, int(fps))
+        interval = max(1, int(1000 / safe_fps))
+        self._frame_step = self.PLAYBACK_BASE_FPS / safe_fps
+        return interval
 
     def play(self, fps: int = 30):
         """播放动画"""
         if self._frames:
             self._playing = True
-            interval = int(1000 / fps)  # 根据fps计算间隔
+            interval = self._set_preview_refresh_rate(fps)
             self._timer.start(interval)
 
     def pause(self):
@@ -365,6 +394,7 @@ class AnimationPreview(QLabel):
         self._playing = False
         self._timer.stop()
         self._current_frame = 0
+        self._playback_position = 0.0
         if self._frames:
             self._show_frame(0)
 
@@ -374,7 +404,7 @@ class AnimationPreview(QLabel):
 
     def set_frame_rate(self, fps: int):
         """设置帧率"""
-        interval = int(1000 / fps)
+        interval = self._set_preview_refresh_rate(fps)
         if self._playing:
             self._timer.setInterval(interval)
 
@@ -393,15 +423,18 @@ class AGICameraPanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self._mesh: Optional[Mesh3D] = None
+        self._mesh: Optional["Mesh3D"] = None
         self._frames: List[np.ndarray] = []
         self._wheel_blocker = WheelBlocker(self)
         self._has_selection = False
+        self._image_available = False
         self._pending_image = None
         self._multiview_images: List[str] = []  # 多视角图片路径列表
         self.image_db = None  # 图像数据库引用
         self._setup_ui()
         self._connect_signals()
+        self._update_generation_actions()
+        self._update_export_actions()
 
         # 注意:不再使用全局事件过滤器，所有鼠标事件由 ClickableImageLabel 直接处理
 
@@ -423,17 +456,20 @@ class AGICameraPanel(QWidget):
         mode_layout.addWidget(QLabel("选择模式:"))
 
         self.point_mode_btn = QPushButton("点选")
+        self.point_mode_btn.setProperty("variant", "secondary")
         self.point_mode_btn.setCheckable(True)
         self.point_mode_btn.setChecked(True)
         self.point_mode_btn.setMinimumWidth(50)
         mode_layout.addWidget(self.point_mode_btn)
 
         self.box_mode_btn = QPushButton("框选")
+        self.box_mode_btn.setProperty("variant", "secondary")
         self.box_mode_btn.setCheckable(True)
         self.box_mode_btn.setMinimumWidth(50)
         mode_layout.addWidget(self.box_mode_btn)
 
         self.path_mode_btn = QPushButton("划线")
+        self.path_mode_btn.setProperty("variant", "secondary")
         self.path_mode_btn.setCheckable(True)
         self.path_mode_btn.setMinimumWidth(50)
         mode_layout.addWidget(self.path_mode_btn)
@@ -441,6 +477,7 @@ class AGICameraPanel(QWidget):
         mode_layout.addStretch()
 
         self.clear_selection_btn = QPushButton("清除选择")
+        self.clear_selection_btn.setProperty("variant", "secondary")
         self.clear_selection_btn.setMinimumWidth(70)
         mode_layout.addWidget(self.clear_selection_btn)
 
@@ -452,7 +489,8 @@ class AGICameraPanel(QWidget):
 
         # 选择状态
         self.selection_status = QLabel("提示: 点击图像中的物体进行选择")
-        self.selection_status.setStyleSheet("color: #888;")
+        self.selection_status.setObjectName("selectionStatus")
+        self.selection_status.setProperty("state", "idle")
         selection_layout.addWidget(self.selection_status)
 
         layout.addWidget(selection_group)
@@ -468,10 +506,12 @@ class AGICameraPanel(QWidget):
         control_layout = QHBoxLayout()
 
         self.play_btn = QPushButton("播放")
+        self.play_btn.setProperty("variant", "secondary")
         self.play_btn.setCheckable(True)
         control_layout.addWidget(self.play_btn)
 
         self.stop_btn = QPushButton("停止")
+        self.stop_btn.setProperty("variant", "secondary")
         control_layout.addWidget(self.stop_btn)
 
         control_layout.addStretch()
@@ -532,19 +572,6 @@ class AGICameraPanel(QWidget):
         axis_layout.addWidget(self.axis_combo)
         params_layout.addLayout(axis_layout)
 
-        # 帧数
-        frames_layout = QHBoxLayout()
-        frames_label = QLabel("动画帧数:")
-        frames_label.setFixedWidth(80)
-        frames_layout.addWidget(frames_label)
-        self.frames_spin = QSpinBox()
-        self.frames_spin.setRange(30, 120)
-        self.frames_spin.setValue(60)
-        self.frames_spin.installEventFilter(self._wheel_blocker)
-        frames_layout.addWidget(self.frames_spin)
-        frames_layout.addStretch()
-        params_layout.addLayout(frames_layout)
-
         layout.addWidget(params_group)
 
         # 多视角重建区域
@@ -553,7 +580,7 @@ class AGICameraPanel(QWidget):
 
         # 说明文字
         multiview_hint = QLabel("上传同一物体的多角度照片，可获得更精确的3D模型")
-        multiview_hint.setStyleSheet("color: #888; font-size: 11px;")
+        multiview_hint.setObjectName("sectionHint")
         multiview_hint.setWordWrap(True)
         multiview_layout.addWidget(multiview_hint)
 
@@ -565,10 +592,12 @@ class AGICameraPanel(QWidget):
         multiview_btn_layout = QHBoxLayout()
 
         self.add_views_btn = QPushButton("添加图片")
+        self.add_views_btn.setProperty("variant", "secondary")
         self.add_views_btn.setMinimumWidth(80)
         multiview_btn_layout.addWidget(self.add_views_btn)
 
         self.clear_views_btn = QPushButton("清空")
+        self.clear_views_btn.setProperty("variant", "secondary")
         self.clear_views_btn.setMinimumWidth(60)
         multiview_btn_layout.addWidget(self.clear_views_btn)
 
@@ -577,9 +606,9 @@ class AGICameraPanel(QWidget):
 
         # 多视角生成按钮
         self.generate_multiview_3d_btn = QPushButton("多视角3D重建")
+        self.generate_multiview_3d_btn.setProperty("variant", "primary")
         self.generate_multiview_3d_btn.setMinimumHeight(40)
         self.generate_multiview_3d_btn.setEnabled(False)
-        self.generate_multiview_3d_btn.setStyleSheet("QPushButton:disabled { color: #666; }")
         multiview_layout.addWidget(self.generate_multiview_3d_btn)
 
         layout.addWidget(multiview_group)
@@ -588,16 +617,18 @@ class AGICameraPanel(QWidget):
         btn_layout = QVBoxLayout()
 
         self.generate_3d_btn = QPushButton("生成整图3D模型")
+        self.generate_3d_btn.setProperty("variant", "primary")
         self.generate_3d_btn.setMinimumHeight(40)
         btn_layout.addWidget(self.generate_3d_btn)
 
         self.generate_object_3d_btn = QPushButton("生成选中物体3D")
+        self.generate_object_3d_btn.setProperty("variant", "primary")
         self.generate_object_3d_btn.setMinimumHeight(40)
         self.generate_object_3d_btn.setEnabled(False)
-        self.generate_object_3d_btn.setStyleSheet("QPushButton:disabled { color: #666; }")
         btn_layout.addWidget(self.generate_object_3d_btn)
 
         self.generate_anim_btn = QPushButton("生成旋转动画")
+        self.generate_anim_btn.setProperty("variant", "secondary")
         self.generate_anim_btn.setMinimumHeight(40)
         btn_layout.addWidget(self.generate_anim_btn)
 
@@ -608,17 +639,29 @@ class AGICameraPanel(QWidget):
         export_layout = QHBoxLayout(export_group)
 
         self.export_model_btn = QPushButton("导出3D模型")
+        self.export_model_btn.setProperty("variant", "secondary")
         export_layout.addWidget(self.export_model_btn)
 
         self.export_gif_btn = QPushButton("导出GIF")
+        self.export_gif_btn.setProperty("variant", "secondary")
         export_layout.addWidget(self.export_gif_btn)
 
         self.export_video_btn = QPushButton("导出视频")
+        self.export_video_btn.setProperty("variant", "secondary")
         export_layout.addWidget(self.export_video_btn)
 
         layout.addWidget(export_group)
 
         layout.addStretch()
+
+        self._image_dependent_widgets = [
+            self.point_mode_btn,
+            self.box_mode_btn,
+            self.path_mode_btn,
+            self.clear_selection_btn,
+            self.generate_3d_btn,
+            self.generate_anim_btn,
+        ]
 
     # 注意：eventFilter 和 _handle_mouse_* 方法已移除
     # 所有鼠标事件由 ClickableImageLabel 直接处理
@@ -661,6 +704,26 @@ class AGICameraPanel(QWidget):
         self.export_gif_btn.clicked.connect(self._export_gif)
         self.export_video_btn.clicked.connect(self._export_video)
 
+    def _update_export_actions(self):
+        """根据当前生成结果更新导出按钮状态。"""
+        self.export_model_btn.setEnabled(self._mesh is not None)
+        has_frames = bool(self._frames)
+        self.export_gif_btn.setEnabled(has_frames)
+        self.export_video_btn.setEnabled(has_frames)
+
+    def _update_generation_actions(self):
+        """根据是否已有当前图像更新生成和选择控件状态。"""
+        for widget in self._image_dependent_widgets:
+            widget.setEnabled(self._image_available)
+        self.generate_object_3d_btn.setEnabled(self._image_available and self._has_selection)
+
+    def set_image_available(self, available: bool):
+        """设置当前图像上下文是否可用。"""
+        self._image_available = available
+        if not available:
+            self._has_selection = False
+        self._update_generation_actions()
+
     def _on_point_mode_toggled(self, checked: bool):
         """切换到点选模式"""
         if checked:
@@ -671,7 +734,7 @@ class AGICameraPanel(QWidget):
             self.path_mode_btn.setChecked(False)
             self.path_mode_btn.blockSignals(False)
             self.image_view.set_selection_mode("point")
-            print("切换到点选模式")
+            logger.debug("切换到点选模式")
 
     def _on_box_mode_toggled(self, checked: bool):
         """切换到框选模式"""
@@ -683,7 +746,7 @@ class AGICameraPanel(QWidget):
             self.path_mode_btn.setChecked(False)
             self.path_mode_btn.blockSignals(False)
             self.image_view.set_selection_mode("box")
-            print("切换到框选模式")
+            logger.debug("切换到框选模式")
 
     def _on_path_mode_toggled(self, checked: bool):
         """切换到划线模式"""
@@ -695,14 +758,14 @@ class AGICameraPanel(QWidget):
             self.box_mode_btn.setChecked(False)
             self.box_mode_btn.blockSignals(False)
             self.image_view.set_selection_mode("path")
-            print("切换到划线模式")
+            logger.debug("切换到划线模式")
 
     def _on_clear_selection(self):
         """清除选择"""
         self._has_selection = False
-        self.generate_object_3d_btn.setEnabled(False)
+        self._update_generation_actions()
         self.selection_status.setText("提示: 点击图像中的物体进行选择")
-        self.selection_status.setStyleSheet("color: #888;")
+        self._set_selection_status_state("idle")
 
         # 恢复原始图像显示（清除选择高亮）
         if hasattr(self, '_pending_image') and self._pending_image is not None:
@@ -710,17 +773,17 @@ class AGICameraPanel(QWidget):
 
     def _on_image_clicked(self, x: int, y: int):
         """图像被点击"""
-        print(f"[AGICameraPanel] 图像点击信号发出: ({x}, {y})")
+        logger.debug("[AGICameraPanel] 图像点击信号发出: (%s, %s)", x, y)
         self.object_selected.emit(x, y)
 
     def _on_box_selected(self, x1: int, y1: int, x2: int, y2: int):
         """框选区域"""
-        print(f"[AGICameraPanel] 框选信号发出: ({x1}, {y1}) - ({x2}, {y2})")
+        logger.debug("[AGICameraPanel] 框选信号发出: (%s, %s) - (%s, %s)", x1, y1, x2, y2)
         self.object_box_selected.emit(x1, y1, x2, y2)
 
     def _on_path_selected(self, path_points: list):
         """划线路径选择"""
-        print(f"[AGICameraPanel] 划线路径信号发出: {len(path_points)} 个点")
+        logger.debug("[AGICameraPanel] 划线路径信号发出: %s 个点", len(path_points))
         self.object_path_selected.emit(path_points)
 
     def _on_generate_object_3d(self):
@@ -730,13 +793,19 @@ class AGICameraPanel(QWidget):
     def set_selection_result(self, success: bool, message: str = ""):
         """设置选择结果"""
         self._has_selection = success
-        self.generate_object_3d_btn.setEnabled(success)
+        self._update_generation_actions()
         if success:
             self.selection_status.setText("已选中物体 - 可以生成3D")
-            self.selection_status.setStyleSheet("color: #4CAF50;")
+            self._set_selection_status_state("success")
         else:
             self.selection_status.setText(message or "选择失败，请重试")
-            self.selection_status.setStyleSheet("color: #f44336;")
+            self._set_selection_status_state("error")
+
+    def _set_selection_status_state(self, state: str):
+        """刷新选择状态标签的视觉状态。"""
+        self.selection_status.setProperty("state", state)
+        self.selection_status.style().unpolish(self.selection_status)
+        self.selection_status.style().polish(self.selection_status)
 
     def update_selection_preview(self, image: np.ndarray):
         """更新选择预览图像"""
@@ -765,7 +834,6 @@ class AGICameraPanel(QWidget):
             "depth_scale": self.depth_slider.value() / 100.0,
             "resolution": int(self.resolution_combo.currentText()),
             "axis": axis_map.get(self.axis_combo.currentText(), "y"),
-            "frames": self.frames_spin.value()
         }
 
     def _on_generate_3d(self):
@@ -778,32 +846,41 @@ class AGICameraPanel(QWidget):
 
     def set_image(self, image: np.ndarray):
         """设置图像用于物体选择"""
-        print(f"[AGICameraPanel] set_image 调用, 图像尺寸: {image.shape}")
+        logger.debug("[AGICameraPanel] set_image 调用, 图像尺寸: %s", image.shape)
+        self._image_available = True
         self._pending_image = image.copy()  # 保存待设置的图像
+        self._mesh = None
+        self._frames = []
+        self.preview.set_frames([])
         self.image_view.set_image(image)
-        print(f"[AGICameraPanel] image_view._image is None: {self.image_view._image is None}")
-        print(f"[AGICameraPanel] image_view 尺寸: {self.image_view.width()}x{self.image_view.height()}")
-        print(f"[AGICameraPanel] image_view 可见: {self.image_view.isVisible()}")
+        logger.debug("[AGICameraPanel] image_view._image is None: %s", self.image_view._image is None)
+        logger.debug("[AGICameraPanel] image_view 尺寸: %sx%s", self.image_view.width(), self.image_view.height())
+        logger.debug("[AGICameraPanel] image_view 可见: %s", self.image_view.isVisible())
         self._on_clear_selection()
+        self._update_generation_actions()
+        self._update_export_actions()
 
     def showEvent(self, event):
         """面板显示事件"""
         super().showEvent(event)
-        print(f"[AGICameraPanel] showEvent - 面板现在可见")
-        print(f"[AGICameraPanel] image_view 尺寸: {self.image_view.width()}x{self.image_view.height()}")
-        print(f"[AGICameraPanel] image_view 可见: {self.image_view.isVisible()}")
+        logger.debug("[AGICameraPanel] showEvent - 面板现在可见")
+        logger.debug("[AGICameraPanel] image_view 尺寸: %sx%s", self.image_view.width(), self.image_view.height())
+        logger.debug("[AGICameraPanel] image_view 可见: %s", self.image_view.isVisible())
         # 如果有待设置的图像，在显示后重新更新显示
         if hasattr(self, '_pending_image') and self._pending_image is not None:
             self.image_view._update_display()
 
-    def set_mesh(self, mesh: Mesh3D):
+    def set_mesh(self, mesh: "Mesh3D"):
         """设置3D网格"""
         self._mesh = mesh
         # 显示一个静态预览 (使用简单投影)
         if mesh is not None:
             self._show_mesh_preview(mesh)
+        else:
+            self.preview.set_frames([])
+        self._update_export_actions()
 
-    def _show_mesh_preview(self, mesh: Mesh3D):
+    def _show_mesh_preview(self, mesh: "Mesh3D"):
         """显示网格预览"""
         # 简单的正交投影预览
         h, w = 300, 300
@@ -829,26 +906,41 @@ class AGICameraPanel(QWidget):
 
     def set_animation(self, frames: List[np.ndarray]):
         """设置动画帧"""
-        self._frames = frames
-        self.preview.set_frames(frames)
+        self._frames = frames or []
+        self.preview.set_frames(self._frames)
+        self._update_export_actions()
 
-    def get_current_mesh(self) -> Optional[Mesh3D]:
+    def has_animation_frames(self) -> bool:
+        """是否已有可导出的动画帧。"""
+        return bool(self._frames)
+
+    def has_selection(self) -> bool:
+        """是否已有有效物体选择。"""
+        return self._has_selection
+
+    def get_current_mesh(self) -> Optional["Mesh3D"]:
         """获取当前网格"""
         return self._mesh
 
     def _export_model(self):
         """导出3D模型"""
         if self._mesh is None:
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "提示", "请先生成3D模型")
             return
 
         # 发射信号给主窗口处理
         self.export_3d_model_requested.emit()
 
+    def _has_animation_frames(self) -> bool:
+        """检查是否已有可导出的动画帧。"""
+        if not self._frames:
+            QMessageBox.warning(self, "提示", "请先生成旋转动画")
+            return False
+        return True
+
     def _export_gif(self):
         """导出GIF"""
-        if not self._frames:
+        if not self._has_animation_frames():
             return
 
         file_path, _ = QFileDialog.getSaveFileName(
@@ -858,14 +950,20 @@ class AGICameraPanel(QWidget):
         if file_path:
             try:
                 import imageio
+            except ImportError:
+                QMessageBox.warning(self, "导出失败", "缺少 imageio，无法导出 GIF")
+                return
+
+            try:
                 rgb_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in self._frames]
                 imageio.mimsave(file_path, rgb_frames, fps=self.fps_spin.value(), loop=0)
-            except ImportError:
-                pass
+                QMessageBox.information(self, "导出完成", f"GIF 已导出:\n{file_path}")
+            except Exception as e:
+                QMessageBox.warning(self, "导出失败", f"无法导出 GIF:\n{e}")
 
     def _export_video(self):
         """导出视频"""
-        if not self._frames:
+        if not self._has_animation_frames():
             return
 
         file_path, _ = QFileDialog.getSaveFileName(
@@ -873,14 +971,24 @@ class AGICameraPanel(QWidget):
         )
 
         if file_path:
-            h, w = self._frames[0].shape[:2]
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(file_path, fourcc, self.fps_spin.value(), (w, h))
+            out = None
+            try:
+                h, w = self._frames[0].shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out = cv2.VideoWriter(file_path, fourcc, self.fps_spin.value(), (w, h))
+                if not out.isOpened():
+                    QMessageBox.warning(self, "导出失败", "视频编码器不可用，无法写入文件")
+                    return
 
-            for frame in self._frames:
-                out.write(frame)
+                for frame in self._frames:
+                    out.write(frame)
 
-            out.release()
+                QMessageBox.information(self, "导出完成", f"视频已导出:\n{file_path}")
+            except Exception as e:
+                QMessageBox.warning(self, "导出失败", f"无法导出视频:\n{e}")
+            finally:
+                if out is not None:
+                    out.release()
 
     def _on_add_views(self):
         """添加多视角图片"""

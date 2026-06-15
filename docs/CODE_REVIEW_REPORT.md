@@ -4,6 +4,8 @@
 **审查日期**: 2025-12-29  
 **审查人**: 高级全栈架构师 (AI Assistant)
 
+> 当前状态更新：v1.2.0 已补齐核心逻辑与 PySide6 UI 回归测试，当前本地验证为 54 个测试通过。本报告保留 v1.0.0 时代的风险背景，新的产品级 UI 升级说明见 `docs/PRODUCT_UI_UPGRADE_v1.2.0.md`。
+
 ---
 
 ## 第一步：代码健康度与语法审查 (Code Health & Syntax)
@@ -172,7 +174,7 @@ AIImageProcessor/
 │   │   ├── panels/         # 主要功能面板
 │   │   └── main_window.py
 │   └── utils/              # 通用工具函数
-├── tests/                  # [Missing] 单元测试与集成测试
+├── tests/                  # 单元测试与 PySide6 UI 回归测试
 ├── requirements.txt
 └── README.md
 ```
@@ -180,7 +182,7 @@ AIImageProcessor/
 **主要变更**:
 1.  **`ai` -> `infrastructure/ai_models`**: 明确这只是底层设施，不是核心业务逻辑。
 2.  **`app`**: 将启动逻辑与源码分离。
-3.  **`tests`**: 必须添加测试目录，当前项目完全缺失测试。
+3.  **`tests`**: v1.2.0 已建立核心逻辑与 UI 回归测试目录，后续仍应继续扩展端到端与性能测试。
 
 ---
 

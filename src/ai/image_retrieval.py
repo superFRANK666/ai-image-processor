@@ -53,6 +53,43 @@ MULTILINGUAL_CLIP_MODELS = {
 }
 
 
+COLOR_SEARCH_ALIASES = {
+    "red": ("红", "红色", "红底", "红背景", "red"),
+    "blue": ("蓝", "蓝色", "蓝底", "蓝背景", "blue"),
+    "green": ("绿", "绿色", "绿底", "绿背景", "green"),
+    "yellow": ("黄", "黄色", "黄底", "黄背景", "yellow"),
+    "white": ("白", "白色", "白底", "白背景", "white"),
+    "black": ("黑", "黑色", "黑底", "黑背景", "black"),
+    "orange": ("橙", "橙色", "橙底", "橙背景", "orange"),
+    "purple": ("紫", "紫色", "紫底", "紫背景", "purple"),
+    "pink": ("粉", "粉色", "粉底", "粉背景", "pink"),
+    "gray": ("灰", "灰色", "灰底", "灰背景", "gray", "grey"),
+    "brown": ("棕", "棕色", "棕底", "棕背景", "brown"),
+    "aqua": ("青", "青色", "青底", "青背景", "cyan", "aqua"),
+}
+
+
+COLOR_PRIMARY_CN = {
+    "red": "红",
+    "blue": "蓝",
+    "green": "绿",
+    "yellow": "黄",
+    "white": "白",
+    "black": "黑",
+    "orange": "橙",
+    "purple": "紫",
+    "pink": "粉",
+    "gray": "灰",
+    "brown": "棕",
+    "aqua": "青",
+}
+
+
+BACKGROUND_QUERY_WORDS = (
+    "底", "底色", "背景", "背景色", "证件照", "id photo", "background"
+)
+
+
 @dataclass
 class ImageFeature:
     """图像特征数据"""
@@ -61,6 +98,8 @@ class ImageFeature:
     color_histogram: np.ndarray  # 颜色直方图特征
     dominant_colors: List[Tuple[int, int, int]]  # 主色调
     metadata: Dict[str, Any]
+    embedding_backend: str = "traditional"
+    embedding_model: str = ""
     # 新增特征
     texture_features: np.ndarray = field(default_factory=lambda: np.array([]))  # 纹理特征
     edge_features: np.ndarray = field(default_factory=lambda: np.array([]))  # 边缘特征
@@ -238,9 +277,14 @@ class ImageFeatureExtractor:
         self.local_model_path = local_model_path
         self.enable_preprocessing = enable_preprocessing
         self.model = None
+        self.image_model = None
         self.embedding_dim = 512
         self._model_init_attempted = False
         self._is_multilingual = False  # 标记是否为多语言模型
+        self.image_embedding_backend = "traditional"
+        self.image_embedding_model = "traditional"
+        self._last_embedding_backend = "traditional"
+        self._last_embedding_model = "traditional"
 
         # 检查本地模型路径
         if local_model_path is None:
@@ -254,6 +298,96 @@ class ImageFeatureExtractor:
                 self._is_multilingual = True
             elif english_path.exists() and (english_path / "0_CLIPModel" / "model.safetensors").exists():
                 self.local_model_path = str(english_path)
+
+    def _get_model_embedding_dimension(self, model) -> int:
+        """返回模型 embedding 维度，兼容 sentence-transformers 新旧 API。"""
+        getter = getattr(model, "get_embedding_dimension", None)
+        if callable(getter):
+            return int(getter())
+
+        legacy_getter = getattr(model, "get_sentence_embedding_dimension", None)
+        if callable(legacy_getter):
+            return int(legacy_getter())
+
+        return int(self.embedding_dim)
+
+    @staticmethod
+    def _is_local_sentence_transformer(path: Path) -> bool:
+        """粗略判断本地目录是否像 sentence-transformers 模型。"""
+        return path.exists() and ((path / "modules.json").exists() or (path / "config.json").exists())
+
+    @staticmethod
+    def _snapshot_offline_env() -> Dict[str, Optional[str]]:
+        return {
+            "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE"),
+            "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE"),
+        }
+
+    @staticmethod
+    def _restore_offline_env(snapshot: Dict[str, Optional[str]]):
+        for env_name, original_value in snapshot.items():
+            if original_value is None:
+                os.environ.pop(env_name, None)
+            else:
+                os.environ[env_name] = original_value
+
+    @staticmethod
+    def _set_model_env_for_source(source: str):
+        if source == "online":
+            os.environ.pop('HF_HUB_OFFLINE', None)
+            os.environ.pop('TRANSFORMERS_OFFLINE', None)
+        else:
+            os.environ['HF_HUB_OFFLINE'] = '1'
+            os.environ['TRANSFORMERS_OFFLINE'] = '1'
+
+    def _load_image_encoder_for_multilingual_text_model(self) -> bool:
+        """多语言 CLIP 文本模型需要原始 CLIP 图像编码器来生成同空间图片向量。"""
+        if SentenceTransformer is None:
+            return False
+
+        project_dir = Path(__file__).parent.parent.parent
+        english_path = project_dir / "models" / "clip-ViT-B-32"
+        candidates = []
+
+        if self._is_local_sentence_transformer(english_path):
+            candidates.append(("local", str(english_path)))
+
+        candidates.append(("online", MULTILINGUAL_CLIP_MODELS["english"]))
+
+        for source, model_path in candidates:
+            env_snapshot = self._snapshot_offline_env()
+            try:
+                if source == "local":
+                    print(f"尝试加载图像编码器: {model_path}")
+                else:
+                    print(f"尝试在线加载图像编码器: {model_path}")
+
+                self._set_model_env_for_source(source)
+                image_model = SentenceTransformer(model_path)
+                image_dim = self._get_model_embedding_dimension(image_model)
+                if image_dim != self.embedding_dim:
+                    print(
+                        f"图像编码器维度不匹配: {image_dim} != {self.embedding_dim}，跳过 {model_path}"
+                    )
+                    continue
+
+                self.image_model = image_model
+                self.image_embedding_backend = "clip_image"
+                self.image_embedding_model = str(model_path)
+                print(f"图像编码器加载成功: {model_path}")
+                return True
+
+            except Exception as e:
+                logger.warning("图像编码器加载失败 (%s): %s", model_path, e)
+                print(f"图像编码器加载失败 ({model_path}): {e}")
+            finally:
+                self._restore_offline_env(env_snapshot)
+
+        self.image_model = None
+        self.image_embedding_backend = "traditional"
+        self.image_embedding_model = "traditional"
+        print("警告: 找不到可用的CLIP图像编码器，文本语义检索将跳过不兼容的旧图像向量")
+        return False
 
     def _init_model(self):
         """延迟初始化CLIP模型 (支持多语言)"""
@@ -282,36 +416,40 @@ class ImageFeatureExtractor:
             models_to_try.append(("online", MULTILINGUAL_CLIP_MODELS["english"]))
 
         for source, model_path in models_to_try:
+            env_snapshot = self._snapshot_offline_env()
             try:
                 print(f"尝试加载CLIP模型: {model_path} ({source})")
 
-                # 对于在线模型，允许下载
-                if source == "online":
-                    os.environ.pop('HF_HUB_OFFLINE', None)
-                    os.environ.pop('TRANSFORMERS_OFFLINE', None)
-                else:
-                    os.environ['HF_HUB_OFFLINE'] = '1'
-                    os.environ['TRANSFORMERS_OFFLINE'] = '1'
+                self._set_model_env_for_source(source)
 
                 self.model = SentenceTransformer(model_path)
-                self.embedding_dim = self.model.get_sentence_embedding_dimension()
+                self.embedding_dim = self._get_model_embedding_dimension(self.model)
 
                 # 检测是否为多语言模型
                 if "multilingual" in model_path.lower():
                     self._is_multilingual = True
+                    self._load_image_encoder_for_multilingual_text_model()
+                else:
+                    self.image_model = self.model
+                    self.image_embedding_backend = "clip_image"
+                    self.image_embedding_model = str(model_path)
 
                 print(f"CLIP模型加载成功: {model_path}")
                 print(f"  - 多语言支持: {'是' if self._is_multilingual else '否'}")
                 print(f"  - 特征维度: {self.embedding_dim}")
+                print(f"  - 图像语义编码: {'可用' if self.image_model is not None else '不可用'}")
                 return
 
             except Exception as e:
                 logger.error(f"模型加载失败 ({model_path}): {e}")
                 print(f"模型加载失败 ({model_path}): {e}")
                 continue
+            finally:
+                self._restore_offline_env(env_snapshot)
 
         print("所有CLIP模型加载失败, 将使用传统特征提取")
         self.model = None
+        self.image_model = None
 
     def extract_features(self, image: np.ndarray, image_path: str = "",
                         use_enhancement: bool = True) -> ImageFeature:
@@ -334,6 +472,8 @@ class ImageFeatureExtractor:
 
         # 提取语义特征 (CLIP embedding)
         embedding = self._extract_semantic_embedding(enhanced_image)
+        embedding_backend = self._last_embedding_backend
+        embedding_model = self._last_embedding_model
 
         # 提取颜色直方图
         color_histogram = self._extract_color_histogram(image)
@@ -356,6 +496,8 @@ class ImageFeatureExtractor:
             color_histogram=color_histogram,
             dominant_colors=dominant_colors,
             metadata=metadata,
+            embedding_backend=embedding_backend,
+            embedding_model=embedding_model,
             texture_features=texture_features,
             edge_features=edge_features
         )
@@ -366,7 +508,7 @@ class ImageFeatureExtractor:
         if not self._model_init_attempted:
             self._init_model()
 
-        if self.model is not None:
+        if self.image_model is not None:
             try:
                 # 转换为RGB
                 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -374,13 +516,17 @@ class ImageFeatureExtractor:
                 pil_image = Image.fromarray(image_rgb)
 
                 # 使用CLIP编码图像
-                embedding = self.model.encode(pil_image)
-                return embedding
+                embedding = self.image_model.encode(pil_image)
+                self._last_embedding_backend = "clip_image"
+                self._last_embedding_model = self.image_embedding_model
+                return np.asarray(embedding, dtype=np.float32)
             except Exception as e:
                 logger.error(f"语义特征提取失败: {e}")
                 print(f"语义特征提取失败: {e}")
 
         # 回退到传统特征
+        self._last_embedding_backend = "traditional"
+        self._last_embedding_model = "traditional"
         return self._extract_traditional_features(image)
 
     def _extract_texture_features(self, image: np.ndarray) -> np.ndarray:
@@ -582,6 +728,7 @@ class ImageIndexDatabase:
         self.db_path = db_path
         self.collection = None
         self.feature_extractor = ImageFeatureExtractor()
+        self._text_index_backend_checked = False
 
         self._init_database()
 
@@ -593,10 +740,27 @@ class ImageIndexDatabase:
             return
 
         try:
-            self.client = chromadb.PersistentClient(path=str(self.db_path))
+            from chromadb.config import Settings
+            settings = Settings(anonymized_telemetry=False)
+            self.client = chromadb.PersistentClient(path=str(self.db_path), settings=settings)
+            
+            try:
+                from chromadb.api.types import EmbeddingFunction
+                class DummyEmbeddingFunction(EmbeddingFunction):
+                    def __init__(self):
+                        pass
+                    def name(self) -> str:
+                        return "default"
+                    def __call__(self, input):
+                        return [[0.0]*512] * len(input)
+                dummy_ef = DummyEmbeddingFunction()
+            except ImportError:
+                dummy_ef = None
+                
             self.collection = self.client.get_or_create_collection(
                 name="image_features",
-                metadata={"hnsw:space": "cosine"}
+                metadata={"hnsw:space": "cosine"},
+                embedding_function=dummy_ef
             )
         except Exception as e:
             logger.error(f"ChromaDB初始化失败: {e}")
@@ -634,6 +798,8 @@ class ImageIndexDatabase:
         metadata = {
             "path": image_path,
             "group": group,
+            "embedding_backend": features.embedding_backend,
+            "embedding_model": features.embedding_model,
             "color_histogram": json.dumps(features.color_histogram.tolist()),
             "dominant_colors": json.dumps(features.dominant_colors),
             # 新增特征存储
@@ -683,6 +849,9 @@ class ImageIndexDatabase:
         if self.feature_extractor.model is None:
             print("警告: CLIP模型未加载，无法重建语义索引")
             return 0
+        if self.feature_extractor.image_model is None:
+            print("警告: CLIP图像编码器未加载，无法重建文本语义索引")
+            return 0
 
         # 获取所有现有图片
         all_images = []
@@ -712,7 +881,7 @@ class ImageIndexDatabase:
         rebuilt = 0
         for i, img_info in enumerate(all_images):
             try:
-                image = cv2.imread(img_info["path"])
+                image = imread_safe(img_info["path"])
                 if image is None:
                     continue
 
@@ -729,6 +898,8 @@ class ImageIndexDatabase:
                         "path": img_info["path"],
                         "group": img_info["group"],
                         "name": img_info["name"],
+                        "embedding_backend": features.embedding_backend,
+                        "embedding_model": features.embedding_model,
                         "color_histogram": json.dumps(features.color_histogram.tolist()),
                         "dominant_colors": json.dumps(features.dominant_colors),
                         # 新增特征存储
@@ -781,6 +952,10 @@ class ImageIndexDatabase:
             similar_images = []
             for i, image_id in enumerate(results['ids'][0]):
                 metadata = results['metadatas'][0][i]
+                if image_id.startswith("__group__") or metadata.get("__is_group_marker__") == "true":
+                    continue
+                if not metadata.get("path"):
+                    continue
                 distance = results['distances'][0][i] if 'distances' in results else 0
 
                 similar_images.append({
@@ -802,21 +977,83 @@ class ImageIndexDatabase:
 
         similarities = []
         for item in self.memory_index:
+            metadata = item.get("metadata", {})
+            if item["id"].startswith("__group__"):
+                continue
+            if metadata.get("__is_group_marker__") == "true":
+                continue
+            if not metadata.get("path"):
+                continue
             sim = np.dot(query_embedding, item["embedding"])
             similarities.append((sim, item))
 
         similarities.sort(key=lambda x: x[0], reverse=True)
 
         results = []
-        for sim, item in similarities[:top_k]:
+        for sim, item in similarities:
             results.append({
                 "id": item["id"],
                 "path": item["metadata"].get("path", ""),
                 "similarity": float(sim),
                 "metadata": item["metadata"]
             })
+            if len(results) >= top_k:
+                break
 
         return results
+
+    def _is_searchable_image_metadata(self, image_id: str, metadata: Optional[Dict]) -> bool:
+        """判断一条 Chroma 记录是否是真实图片记录。"""
+        metadata = metadata or {}
+        if image_id.startswith("__group__"):
+            return False
+        if metadata.get("__is_group_marker__") == "true":
+            return False
+        if not metadata.get("path"):
+            return False
+        return True
+
+    def _has_text_compatible_embedding(self, metadata: Optional[Dict]) -> bool:
+        """文本 CLIP 查询只能和 CLIP 图像 embedding 比较。"""
+        metadata = metadata or {}
+        return metadata.get("embedding_backend") == "clip_image"
+
+    def _ensure_text_search_embeddings_ready(self) -> bool:
+        """确保文本语义检索不会使用旧版/传统兜底图像向量。"""
+        if self.feature_extractor.image_model is None:
+            print("[搜索] CLIP图像编码器未加载，跳过文本语义搜索")
+            return False
+
+        if self.collection is None:
+            return True
+
+        if getattr(self, "_text_index_backend_checked", False):
+            return True
+
+        self._text_index_backend_checked = True
+
+        try:
+            results = self.collection.get(include=['metadatas'])
+        except Exception as e:
+            logger.debug("检查文本语义索引后端失败: %s", e, exc_info=True)
+            return True
+
+        stale_count = 0
+        if results and results.get('ids'):
+            for i, image_id in enumerate(results['ids']):
+                metadata = results['metadatas'][i] if results.get('metadatas') else {}
+                if not self._is_searchable_image_metadata(image_id, metadata):
+                    continue
+                if not self._has_text_compatible_embedding(metadata):
+                    stale_count += 1
+
+        if stale_count <= 0:
+            return True
+
+        print(f"[搜索] 检测到 {stale_count} 张旧索引缺少CLIP图像语义特征，正在重建...")
+        rebuilt = self.rebuild_all_indexes()
+        print(f"[搜索] 已重建 {rebuilt} 张图片索引")
+        return True
 
     def search_by_text(self, text_query: str, top_k: int = 5,
                       use_multi_feature: bool = True) -> List[Dict[str, Any]]:
@@ -838,6 +1075,7 @@ class ImageIndexDatabase:
         """
         results = []
         seen_ids = set()
+        search_intent = self._analyze_search_intent(text_query)
 
         # 1. 首先进行名称/路径匹配搜索
         name_results = self.search_by_name(text_query, top_k)
@@ -858,7 +1096,7 @@ class ImageIndexDatabase:
         # 语义搜索相似度阈值 (多语言模型可以降低阈值)
         SIMILARITY_THRESHOLD = 0.20 if self.feature_extractor._is_multilingual else 0.23
 
-        if self.feature_extractor.model is not None:
+        if self.feature_extractor.model is not None and self._ensure_text_search_embeddings_ready():
             try:
                 # 多语言模型直接使用原文搜索，否则翻译
                 if self.feature_extractor._is_multilingual:
@@ -890,6 +1128,8 @@ class ImageIndexDatabase:
                         metadata = query_results['metadatas'][0][i]
                         if not metadata.get("path"):
                             continue
+                        if not self._has_text_compatible_embedding(metadata):
+                            continue
 
                         distance = query_results['distances'][0][i] if 'distances' in query_results else 0
                         semantic_similarity = 1 - distance
@@ -904,8 +1144,15 @@ class ImageIndexDatabase:
 
                     # 3. 多特征综合评分
                     if use_multi_feature and candidates:
+                        candidates = self._merge_metadata_feature_candidates(
+                            candidates,
+                            text_query,
+                            search_intent,
+                            seen_ids,
+                            limit=n_candidates,
+                        )
                         candidates = self._multi_feature_rerank(
-                            candidates, text_query, text_embedding
+                            candidates, text_query, text_embedding, search_intent
                         )
 
                     # 过滤和添加结果
@@ -926,7 +1173,7 @@ class ImageIndexDatabase:
                             "similarity": final_score,
                             "semantic_similarity": candidate['semantic_similarity'],
                             "metadata": candidate['metadata'],
-                            "match_type": 'semantic'
+                            "match_type": candidate.get('match_type', 'semantic')
                         })
 
                         if len(results) >= top_k:
@@ -935,6 +1182,8 @@ class ImageIndexDatabase:
                     semantic_results = self._memory_search(text_embedding, top_k * 3)
                     for item in semantic_results:
                         if item['id'] not in seen_ids:
+                            if not self._has_text_compatible_embedding(item.get('metadata')):
+                                continue
                             if item.get('similarity', 0) < SIMILARITY_THRESHOLD:
                                 continue
                             seen_ids.add(item['id'])
@@ -948,15 +1197,132 @@ class ImageIndexDatabase:
                 import traceback
                 traceback.print_exc()
         else:
-            print(f"[搜索] CLIP模型未加载，仅使用名称搜索")
+            if self.feature_extractor.model is not None:
+                print("[搜索] 文本语义搜索不可用，仅使用名称搜索")
+            else:
+                print(f"[搜索] CLIP模型未加载，仅使用名称搜索")
+
+        if (use_multi_feature and search_intent.get('color_keywords')
+                and len(results) < top_k):
+            fallback_candidates = self._metadata_feature_candidates(
+                text_query,
+                search_intent,
+                exclude_ids=seen_ids,
+                limit=top_k * 5,
+            )
+            if fallback_candidates:
+                fallback_candidates = self._multi_feature_rerank(
+                    fallback_candidates,
+                    text_query,
+                    np.array([], dtype=np.float32),
+                    search_intent,
+                )
+                for candidate in fallback_candidates:
+                    final_score = candidate.get('final_score', 0)
+                    if final_score < SIMILARITY_THRESHOLD:
+                        continue
+
+                    seen_ids.add(candidate['id'])
+                    results.append({
+                        "id": candidate['id'],
+                        "path": candidate['path'],
+                        "similarity": final_score,
+                        "semantic_similarity": candidate.get('semantic_similarity', 0),
+                        "metadata": candidate['metadata'],
+                        "match_type": 'metadata_color'
+                    })
+
+                    if len(results) >= top_k:
+                        break
 
         # 按相似度排序后返回
         results.sort(key=lambda x: x.get('similarity', 0), reverse=True)
         print(f"[搜索] 找到 {len(results)} 个结果")
         return results[:top_k]
 
+    def _metadata_feature_candidates(self, text_query: str, search_intent: Dict[str, Any],
+                                     exclude_ids: Optional[set] = None,
+                                     limit: int = 100) -> List[Dict]:
+        """从索引元数据中召回颜色/名称强匹配候选，弥补 CLIP 候选漏召。"""
+        if not search_intent.get('color_keywords'):
+            return []
+
+        exclude_ids = exclude_ids or set()
+        records = []
+
+        if self.collection is not None:
+            try:
+                all_images = self.collection.get(include=['metadatas'])
+            except Exception as e:
+                logger.debug("颜色元数据召回失败: %s", e, exc_info=True)
+                all_images = None
+
+            if all_images and all_images.get('ids'):
+                for i, image_id in enumerate(all_images['ids']):
+                    metadata = all_images['metadatas'][i] if all_images.get('metadatas') else {}
+                    records.append((image_id, metadata))
+        else:
+            for item in getattr(self, "memory_index", []):
+                records.append((item.get("id", ""), item.get("metadata", {})))
+
+        candidates = []
+        for image_id, metadata in records:
+            if image_id in exclude_ids:
+                continue
+            if not self._is_searchable_image_metadata(image_id, metadata):
+                continue
+
+            color_score = self._compute_color_match_score(
+                metadata,
+                search_intent['color_keywords'],
+                background_intent=search_intent.get('background_intent', False),
+            )
+            name_score = self._compute_name_match_score(metadata, text_query, search_intent)
+
+            if color_score < 0.18 and name_score <= 0:
+                continue
+
+            candidates.append({
+                "id": image_id,
+                "path": metadata.get("path", ""),
+                "semantic_similarity": 0.0,
+                "metadata": metadata,
+                "match_type": "metadata_color",
+                "_metadata_prefilter_score": color_score + name_score * 0.35,
+            })
+
+        candidates.sort(key=lambda item: item.get("_metadata_prefilter_score", 0), reverse=True)
+        return candidates[:limit]
+
+    def _merge_metadata_feature_candidates(self, candidates: List[Dict], text_query: str,
+                                           search_intent: Dict[str, Any],
+                                           exclude_ids: Optional[set] = None,
+                                           limit: int = 100) -> List[Dict]:
+        """把语义候选和颜色元数据候选合并，保留同一图片的语义分。"""
+        if not search_intent.get('color_keywords'):
+            return candidates
+
+        merged = list(candidates)
+        existing_ids = {candidate.get("id") for candidate in merged}
+        metadata_candidates = self._metadata_feature_candidates(
+            text_query,
+            search_intent,
+            exclude_ids=exclude_ids,
+            limit=limit,
+        )
+
+        for candidate in metadata_candidates:
+            image_id = candidate.get("id")
+            if image_id in existing_ids:
+                continue
+            merged.append(candidate)
+            existing_ids.add(image_id)
+
+        return merged
+
     def _multi_feature_rerank(self, candidates: List[Dict], text_query: str,
-                             text_embedding: np.ndarray) -> List[Dict]:
+                             text_embedding: np.ndarray,
+                             search_intent: Optional[Dict[str, Any]] = None) -> List[Dict]:
         """
         多特征综合重排序
 
@@ -970,46 +1336,57 @@ class ImageIndexDatabase:
         Returns:
             重排序后的候选列表
         """
-        # 特征权重配置
-        WEIGHTS = {
-            'semantic': 0.6,      # 语义特征权重
-            'color': 0.2,         # 颜色特征权重
-            'brightness': 0.1,    # 亮度特征权重
-            'texture': 0.1,       # 纹理特征权重
-        }
-
-        # 解析查询中的颜色关键词
-        color_keywords = self._extract_color_keywords(text_query)
+        search_intent = search_intent or self._analyze_search_intent(text_query)
+        color_keywords = search_intent['color_keywords']
         brightness_keywords = self._extract_brightness_keywords(text_query)
+        texture_keywords = self._extract_texture_keywords(text_query)
+        has_brightness_intent = any(brightness_keywords.values())
+        has_texture_intent = any(texture_keywords.values())
+        weights = self._feature_weights_for_intent(
+            search_intent,
+            has_brightness_intent,
+            has_texture_intent,
+        )
+        name_bonus_weight = 0.12 if color_keywords else 0.08
 
         for candidate in candidates:
             scores = {
-                'semantic': candidate['semantic_similarity']
+                'semantic': self._clamp01(float(candidate.get('semantic_similarity', 0)))
             }
 
             metadata = candidate['metadata']
 
             # 颜色匹配评分
             if color_keywords:
-                color_score = self._compute_color_match_score(metadata, color_keywords)
+                color_score = self._compute_color_match_score(
+                    metadata,
+                    color_keywords,
+                    background_intent=search_intent.get('background_intent', False),
+                )
                 scores['color'] = color_score
-            else:
-                scores['color'] = 0.5  # 中性分数
 
             # 亮度匹配评分
-            if brightness_keywords:
+            if has_brightness_intent:
                 brightness = metadata.get('brightness', 128)
                 brightness_score = self._compute_brightness_match_score(brightness, brightness_keywords)
                 scores['brightness'] = brightness_score
-            else:
-                scores['brightness'] = 0.5
 
-            # 纹理复杂度评分 (根据查询需求)
-            contrast = metadata.get('contrast', 50)
-            scores['texture'] = min(contrast / 100, 1.0)
+            if has_texture_intent:
+                contrast = metadata.get('contrast', 50)
+                scores['texture'] = self._compute_texture_match_score(contrast, texture_keywords)
 
-            # 计算加权综合得分
-            final_score = sum(WEIGHTS[k] * scores.get(k, 0.5) for k in WEIGHTS)
+            scores['name'] = self._compute_name_match_score(metadata, text_query, search_intent)
+
+            weighted_total = 0.0
+            used_weight = 0.0
+            for key, weight in weights.items():
+                if key not in scores:
+                    continue
+                weighted_total += weight * scores[key]
+                used_weight += weight
+
+            final_score = weighted_total / used_weight if used_weight else scores['semantic']
+            final_score = min(1.0, final_score + name_bonus_weight * scores['name'])
             candidate['final_score'] = final_score
             candidate['score_breakdown'] = scores
 
@@ -1017,30 +1394,72 @@ class ImageIndexDatabase:
         candidates.sort(key=lambda x: x['final_score'], reverse=True)
         return candidates
 
-    def _extract_color_keywords(self, text: str) -> List[str]:
-        """从查询文本中提取颜色关键词"""
-        color_map = {
-            '红': 'red', '红色': 'red',
-            '蓝': 'blue', '蓝色': 'blue',
-            '绿': 'green', '绿色': 'green',
-            '黄': 'yellow', '黄色': 'yellow',
-            '白': 'white', '白色': 'white',
-            '黑': 'black', '黑色': 'black',
-            '橙': 'orange', '橙色': 'orange',
-            '紫': 'purple', '紫色': 'purple',
-            '粉': 'pink', '粉色': 'pink',
-            '灰': 'gray', '灰色': 'gray',
-            '棕': 'brown', '棕色': 'brown',
-            'red': 'red', 'blue': 'blue', 'green': 'green',
-            'yellow': 'yellow', 'white': 'white', 'black': 'black',
-            'orange': 'orange', 'purple': 'purple', 'pink': 'pink',
+    def _analyze_search_intent(self, text: str) -> Dict[str, Any]:
+        """识别查询是否是颜色、背景色或颜色+主体检索。"""
+        color_keywords = self._extract_color_keywords(text)
+        text_lower = text.lower().strip()
+        background_intent = bool(color_keywords) and any(
+            word in text_lower for word in BACKGROUND_QUERY_WORDS
+        )
+
+        remaining = text_lower
+        for color in color_keywords:
+            aliases = sorted(COLOR_SEARCH_ALIASES.get(color, ()), key=len, reverse=True)
+            for alias in aliases:
+                remaining = remaining.replace(alias.lower(), " ")
+
+        filler_words = (
+            "颜色", "彩色", "色", "图片", "照片", "图像", "素材", "搜索",
+            "查找", "找", "一个", "一张", "的", "和", "与", "及", "是",
+            "背景色", "背景", "底色", "底", "photo", "image", "picture",
+        )
+        for word in filler_words:
+            remaining = remaining.replace(word, " ")
+
+        has_non_color_terms = bool("".join(remaining.split()))
+        return {
+            "color_keywords": color_keywords,
+            "background_intent": background_intent,
+            "color_only": bool(color_keywords) and not has_non_color_terms,
+            "has_non_color_terms": has_non_color_terms,
         }
 
+    def _feature_weights_for_intent(self, search_intent: Dict[str, Any],
+                                    has_brightness_intent: bool,
+                                    has_texture_intent: bool) -> Dict[str, float]:
+        """根据查询意图动态分配特征权重。"""
+        if search_intent.get('color_keywords'):
+            if search_intent.get('color_only'):
+                weights = {'semantic': 0.22, 'color': 0.78}
+            elif search_intent.get('background_intent'):
+                weights = {'semantic': 0.30, 'color': 0.70}
+            else:
+                weights = {'semantic': 0.50, 'color': 0.50}
+        else:
+            weights = {'semantic': 1.0}
+
+        if has_brightness_intent:
+            weights = self._add_optional_weight(weights, 'brightness', 0.08)
+        if has_texture_intent:
+            weights = self._add_optional_weight(weights, 'texture', 0.06)
+
+        total = sum(weights.values()) or 1.0
+        return {key: value / total for key, value in weights.items()}
+
+    @staticmethod
+    def _add_optional_weight(weights: Dict[str, float], key: str, weight: float) -> Dict[str, float]:
+        scaled = {name: value * (1.0 - weight) for name, value in weights.items()}
+        scaled[key] = weight
+        return scaled
+
+    def _extract_color_keywords(self, text: str) -> List[str]:
+        """从查询文本中提取颜色关键词"""
+        text_lower = text.lower()
         found_colors = []
-        for cn, en in color_map.items():
-            if cn in text.lower():
-                found_colors.append(en)
-        return list(set(found_colors))
+        for color, aliases in COLOR_SEARCH_ALIASES.items():
+            if any(alias.lower() in text_lower for alias in aliases):
+                found_colors.append(color)
+        return found_colors
 
     def _extract_brightness_keywords(self, text: str) -> Dict[str, bool]:
         """从查询文本中提取亮度关键词"""
@@ -1056,7 +1475,18 @@ class ImageIndexDatabase:
                 result['dark'] = True
         return result
 
-    def _compute_color_match_score(self, metadata: Dict, target_colors: List[str]) -> float:
+    def _extract_texture_keywords(self, text: str) -> Dict[str, bool]:
+        """从查询文本中提取纹理/简洁度关键词。"""
+        text_lower = text.lower()
+        detailed_words = ['纹理', '质感', '细节', '复杂', '清晰', 'texture', 'detailed']
+        simple_words = ['简洁', '干净', '纯色', '平滑', '简单', 'simple', 'clean', 'minimal']
+        return {
+            'detailed': any(word in text_lower for word in detailed_words),
+            'simple': any(word in text_lower for word in simple_words),
+        }
+
+    def _compute_color_match_score(self, metadata: Dict, target_colors: List[str],
+                                   background_intent: bool = False) -> float:
         """计算颜色匹配得分"""
         try:
             dominant_colors_str = metadata.get('dominant_colors', '[]')
@@ -1066,59 +1496,160 @@ class ImageIndexDatabase:
                 dominant_colors = dominant_colors_str
 
             if not dominant_colors:
-                return 0.5
-
-            # 颜色名称到 BGR 范围的映射
-            color_ranges = {
-                'red': [(0, 0, 150), (100, 100, 255)],
-                'blue': [(150, 0, 0), (255, 100, 100)],
-                'green': [(0, 150, 0), (100, 255, 100)],
-                'yellow': [(0, 150, 150), (100, 255, 255)],
-                'white': [(200, 200, 200), (255, 255, 255)],
-                'black': [(0, 0, 0), (50, 50, 50)],
-                'orange': [(0, 100, 200), (100, 180, 255)],
-                'purple': [(150, 0, 150), (255, 100, 255)],
-                'pink': [(150, 150, 200), (255, 200, 255)],
-                'gray': [(100, 100, 100), (180, 180, 180)],
-                'brown': [(0, 50, 100), (100, 150, 180)],
-            }
+                return 0.0
 
             max_score = 0
+            rank_weights = (
+                [1.0, 0.66, 0.44, 0.30, 0.20]
+                if background_intent else
+                [1.0, 0.78, 0.60, 0.45, 0.34]
+            )
             for target_color in target_colors:
-                if target_color not in color_ranges:
-                    continue
-
-                low, high = color_ranges[target_color]
-                for color in dominant_colors[:3]:  # 只检查前3个主色
+                for rank, color in enumerate(dominant_colors[:len(rank_weights)]):
                     if isinstance(color, (list, tuple)) and len(color) >= 3:
-                        b, g, r = color[0], color[1], color[2]
-                        # 检查是否在颜色范围内
-                        if (low[0] <= b <= high[0] and
-                            low[1] <= g <= high[1] and
-                            low[2] <= r <= high[2]):
-                            max_score = max(max_score, 1.0)
-                        else:
-                            # 计算距离得分
-                            dist = sum(abs(color[i] - (low[i] + high[i]) / 2) for i in range(3))
-                            score = max(0, 1 - dist / 400)
-                            max_score = max(max_score, score)
+                        color_score = self._score_bgr_color_against_target(color, target_color)
+                        max_score = max(max_score, color_score * rank_weights[rank])
 
-            return max_score if max_score > 0 else 0.3
+            return self._clamp01(max_score)
 
         except Exception:
-            return 0.5
+            return 0.0
+
+    def _score_bgr_color_against_target(self, bgr_color, target_color: str) -> float:
+        """用 HSV 判断单个 BGR 主色与目标颜色的匹配度。"""
+        b, g, r = [int(np.clip(float(channel), 0, 255)) for channel in bgr_color[:3]]
+        hsv = cv2.cvtColor(np.uint8([[[b, g, r]]]), cv2.COLOR_BGR2HSV)[0][0]
+        hue, saturation, value = [float(v) for v in hsv]
+
+        if target_color == 'white':
+            return self._clamp01((value - 185) / 55) * self._clamp01((55 - saturation) / 55)
+        if target_color == 'black':
+            return self._clamp01((85 - value) / 85)
+        if target_color == 'gray':
+            neutral_score = self._clamp01((65 - saturation) / 65)
+            value_score = 1.0 - min(abs(value - 145) / 145, 1.0)
+            return self._clamp01(neutral_score * value_score)
+
+        hue_rules = {
+            'red': ((0, 179), 13, 45, 45),
+            'orange': ((15,), 15, 50, 55),
+            'yellow': ((30,), 17, 45, 65),
+            'green': ((60,), 24, 42, 45),
+            'aqua': ((90,), 22, 42, 45),
+            'blue': ((108,), 24, 35, 45),
+            'purple': ((138,), 24, 42, 45),
+            'pink': ((165,), 18, 35, 75),
+            'brown': ((14,), 18, 45, 35),
+        }
+        if target_color not in hue_rules:
+            return 0.0
+
+        centers, tolerance, min_saturation, min_value = hue_rules[target_color]
+        hue_score = self._hue_match_score(hue, centers, tolerance)
+        saturation_score = self._clamp01((saturation - min_saturation) / max(1, 140 - min_saturation))
+        value_score = self._clamp01((value - min_value) / max(1, 160 - min_value))
+        score = hue_score * saturation_score * value_score
+
+        if target_color == 'brown':
+            too_bright_penalty = 1.0 - 0.45 * self._clamp01((value - 190) / 65)
+            score *= too_bright_penalty
+
+        return self._clamp01(score)
+
+    @staticmethod
+    def _hue_match_score(hue: float, centers: Tuple[int, ...], tolerance: float) -> float:
+        distances = [min(abs(hue - center), 180 - abs(hue - center)) for center in centers]
+        return max(0.0, 1.0 - min(distances) / tolerance)
+
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        return float(max(0.0, min(1.0, value)))
+
+    def _compute_name_match_score(self, metadata: Dict, text_query: str,
+                                  search_intent: Optional[Dict[str, Any]] = None) -> float:
+        """计算查询词与文件名/路径/显示名的匹配度，支持颜色同义表达。"""
+        searchable = self._searchable_name_text(metadata)
+        if not searchable:
+            return 0.0
+
+        raw_query = text_query.lower().strip()
+        if raw_query and raw_query in searchable:
+            return 1.0
+
+        for term in self._build_name_query_terms(text_query, search_intent):
+            if not term or term == raw_query:
+                continue
+            if term in searchable:
+                if len(term) >= 4:
+                    return 0.96
+                if len(term) >= 2:
+                    return 0.90
+                return 0.78
+
+        return 0.0
+
+    def _searchable_name_text(self, metadata: Dict) -> str:
+        path = str(metadata.get("path", "") or "")
+        name = str(metadata.get("name", "") or "")
+        filename = Path(path).stem if path else ""
+        return " ".join([name, filename, path]).lower()
+
+    def _build_name_query_terms(self, query: str,
+                                search_intent: Optional[Dict[str, Any]] = None) -> List[str]:
+        """生成名称搜索同义词，例如“蓝色证件照”可匹配“蓝底证件照”。"""
+        query_lower = query.lower().strip()
+        search_intent = search_intent or self._analyze_search_intent(query)
+        terms = [query_lower]
+
+        for color in search_intent.get('color_keywords', []):
+            cn = COLOR_PRIMARY_CN.get(color)
+            aliases = COLOR_SEARCH_ALIASES.get(color, ())
+            terms.extend(alias.lower() for alias in aliases)
+
+            if cn:
+                replacements = [
+                    (f"{cn}色", f"{cn}底"),
+                    (f"{cn}色", f"{cn}背景"),
+                    (f"{cn}色", cn),
+                    (f"{cn}背景", f"{cn}底"),
+                ]
+                for source, replacement in replacements:
+                    if source in query_lower:
+                        terms.append(query_lower.replace(source, replacement))
+
+                if "证件照" in query_lower:
+                    terms.extend([f"{cn}底证件照", f"{cn}背景证件照", f"{cn}色证件照"])
+
+        unique_terms = []
+        seen = set()
+        for term in sorted((term.strip() for term in terms), key=len, reverse=True):
+            if not term or term in seen:
+                continue
+            seen.add(term)
+            unique_terms.append(term)
+        return unique_terms
 
     def _compute_brightness_match_score(self, brightness: float,
                                         keywords: Dict[str, bool]) -> float:
         """计算亮度匹配得分"""
+        brightness = float(brightness)
         if keywords.get('bright') and not keywords.get('dark'):
             # 期望亮图像
-            return brightness / 255
+            return self._clamp01(brightness / 255)
         elif keywords.get('dark') and not keywords.get('bright'):
             # 期望暗图像
-            return 1 - brightness / 255
+            return self._clamp01(1 - brightness / 255)
         else:
             return 0.5
+
+    def _compute_texture_match_score(self, contrast: float, keywords: Dict[str, bool]) -> float:
+        """计算纹理/简洁度匹配得分，只在用户明确提及时启用。"""
+        texture_level = self._clamp01(float(contrast) / 110)
+        if keywords.get('detailed') and not keywords.get('simple'):
+            return texture_level
+        if keywords.get('simple') and not keywords.get('detailed'):
+            return 1 - texture_level
+        return 0.5
 
     def _translate_to_english(self, text: str) -> str:
         """
@@ -1308,7 +1839,8 @@ class ImageIndexDatabase:
             匹配的图像列表
         """
         results = []
-        query_lower = query.lower()
+        search_intent = self._analyze_search_intent(query)
+        query_terms = self._build_name_query_terms(query, search_intent)
 
         if self.collection is not None:
             try:
@@ -1329,18 +1861,15 @@ class ImageIndexDatabase:
                             continue
 
                         # 检查名称匹配
-                        name = metadata.get("name", "")
-                        filename = Path(path).stem if path else ""
+                        searchable = self._searchable_name_text(metadata)
+                        match_score = self._compute_name_match_score(metadata, query, search_intent)
 
                         # 在名称、文件名、路径中搜索
-                        if (query_lower in name.lower() or
-                            query_lower in filename.lower() or
-                            query_lower in path.lower()):
-
+                        if match_score > 0 or any(term and term in searchable for term in query_terms):
                             results.append({
                                 "id": image_id,
                                 "path": path,
-                                "similarity": 1.0,  # 名称匹配给高相似度
+                                "similarity": max(match_score, 0.78),
                                 "metadata": metadata
                             })
 
@@ -1362,17 +1891,14 @@ class ImageIndexDatabase:
                 if not path:
                     continue
 
-                name = metadata.get("name", "")
-                filename = Path(path).stem if path else ""
+                searchable = self._searchable_name_text(metadata)
+                match_score = self._compute_name_match_score(metadata, query, search_intent)
 
-                if (query_lower in name.lower() or
-                    query_lower in filename.lower() or
-                    query_lower in path.lower()):
-
+                if match_score > 0 or any(term and term in searchable for term in query_terms):
                     results.append({
                         "id": item["id"],
                         "path": path,
-                        "similarity": 1.0,
+                        "similarity": max(match_score, 0.78),
                         "metadata": metadata
                     })
 
@@ -1384,8 +1910,30 @@ class ImageIndexDatabase:
     def get_image_count(self) -> int:
         """获取索引中的图像数量"""
         if self.collection is not None:
-            return self.collection.count()
-        return len(self.memory_index)
+            try:
+                results = self.collection.get(include=['metadatas'])
+                if not results or not results.get('ids'):
+                    return 0
+                count = 0
+                for i, image_id in enumerate(results['ids']):
+                    metadata = results['metadatas'][i]
+                    if image_id.startswith("__group__"):
+                        continue
+                    if metadata.get("__is_group_marker__") == "true":
+                        continue
+                    if not metadata.get("path"):
+                        continue
+                    count += 1
+                return count
+            except Exception as e:
+                print(f"获取图像数量失败: {e}")
+                return 0
+        return len([
+            item for item in self.memory_index
+            if not item["id"].startswith("__group__")
+            and item["metadata"].get("__is_group_marker__") != "true"
+            and item["metadata"].get("path")
+        ])
 
     def get_all_images(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """
@@ -1414,6 +1962,12 @@ class ImageIndexDatabase:
                     if ids is not None and len(ids) > 0:
                         for i, image_id in enumerate(ids):
                             metadata = results['metadatas'][i]
+                            if image_id.startswith("__group__"):
+                                continue
+                            if metadata.get("__is_group_marker__") == "true":
+                                continue
+                            if not metadata.get("path"):
+                                continue
                             
                             embedding_val = None
                             embeddings = results.get('embeddings')
@@ -1432,10 +1986,16 @@ class ImageIndexDatabase:
                 return []
         else:
             # 内存索引分页
+            filtered = [
+                item for item in self.memory_index
+                if not item["id"].startswith("__group__")
+                and item["metadata"].get("__is_group_marker__") != "true"
+                and item["metadata"].get("path")
+            ]
             start = offset
-            end = min(offset + limit, len(self.memory_index))
+            end = min(offset + limit, len(filtered))
             results = []
-            for item in self.memory_index[start:end]:
+            for item in filtered[start:end]:
                 results.append({
                     "id": item["id"],
                     "path": item["metadata"].get("path", ""),

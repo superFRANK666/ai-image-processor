@@ -44,6 +44,7 @@ Thumbs.db
 *.temp
 *.bak
 *.orig
+artifacts/
 
 # 核心配置文件 (保留示例，忽略本地实际配置)
 llm_config.json

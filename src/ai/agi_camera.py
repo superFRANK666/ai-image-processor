@@ -32,19 +32,22 @@ try:
     from transformers import AutoImageProcessor, AutoModelForDepthEstimation
     HAS_TRANSFORMERS = True
 except ImportError:
+    torch = None
+    AutoImageProcessor = None
+    AutoModelForDepthEstimation = None
     HAS_TRANSFORMERS = False
 
-# MobileSAM 分割模型支持
-HAS_MOBILE_SAM = False
+# SAM2 分割模型支持
+HAS_SAM2 = False
 try:
-    from ..mobile_sam import sam_model_registry, SamPredictor
-    HAS_MOBILE_SAM = True
+    from transformers import Sam2Model, Sam2Processor
+    HAS_SAM2 = True
 except ImportError:
-    pass
+    Sam2Model = None
+    Sam2Processor = None
 
 # 导入几何工具类 (使用相对导入)
 from ..utils.geometry_utils import GeometryUtils
-
 
 
 @dataclass
@@ -61,11 +64,12 @@ class Mesh3D:
 class ObjectSegmenter:
     """
     物体分割器
-    使用MobileSAM模型从图片中分割出特定物体
+    使用 SAM2 模型从图片中分割出特定物体
     支持点击选择物体
 
     性能优化:
-    - 图像缓存: 避免重复预处理
+    - 图像哈希缓存: 避免重复预处理
+    - SAM2 图像 embedding 缓存: 换图时编码一次,多次提示只解码掩码
     - 智能缩放: 大图自动缩放提速
     - 多掩码输出: 选择最佳分割结果
     """
@@ -80,7 +84,8 @@ class ObjectSegmenter:
         """
         self.use_gpu = use_gpu
         self.device = "cuda" if use_gpu and torch is not None and torch.cuda.is_available() else "cpu"
-        self.predictor = None
+        self.model = None
+        self.processor = None
         self.current_image = None
         self.max_size = max_size
 
@@ -88,47 +93,50 @@ class ObjectSegmenter:
         self._cached_image_hash = None
         self._image_scale = 1.0  # 记录缩放比例
         self._original_size = None  # 原始图像尺寸
+        self._sam2_rgb_image = None
+        self._sam2_image_embeddings = None
+        self._sam2_original_sizes = None
 
         self._load_model()
 
+    @staticmethod
+    def _sam2_snapshot_ready(model_path: Path) -> bool:
+        """判断本地 SAM2 目录是否包含可加载的 Transformers 权重。"""
+        if not model_path.exists() or not model_path.is_dir():
+            return False
+        has_config = (model_path / "config.json").exists()
+        has_processor = (
+            (model_path / "preprocessor_config.json").exists()
+            or (model_path / "processor_config.json").exists()
+        )
+        has_weights = any(model_path.glob("*.safetensors")) or any(model_path.glob("*.bin"))
+        return has_config and has_processor and has_weights
+
     def _load_model(self):
-        """加载MobileSAM模型"""
-        if not HAS_MOBILE_SAM:
-            # 尝试直接加载 checkpoint
-            model_path = Path(__file__).parent.parent.parent / "models" / "mobile-sam" / "mobile_sam.pt"
-            if model_path.exists() and torch is not None:
-                try:
-                    print(f"加载MobileSAM模型: {model_path}")
-                    # 使用简化的SAM加载方式
-                    self._load_sam_checkpoint(model_path)
-                    return
-                except Exception as e:
-                    print(f"加载MobileSAM失败: {e}")
-            print("提示: 未加载物体分割模型")
-            print("  如需选择物体功能，请运行: python scripts/download_all_models.py")
+        """加载 SAM2 模型。"""
+        if not HAS_SAM2 or torch is None:
+            print("提示: 当前环境不支持 SAM2 分割模型")
+            print("  请确认 transformers 版本支持 Sam2Model/Sam2Processor，并运行: python scripts/download_all_models.py")
             return
 
-        model_path = Path(__file__).parent.parent.parent / "models" / "mobile-sam" / "mobile_sam.pt"
-        if model_path.exists():
-            try:
-                print(f"加载MobileSAM模型: {model_path}")
-                sam = sam_model_registry["vit_t"](checkpoint=str(model_path))
-                sam.to(device=self.device)
-                sam.eval()
-                self.predictor = SamPredictor(sam)
-                print(f"MobileSAM加载成功 (设备: {self.device})")
-            except Exception as e:
-                print(f"加载MobileSAM失败: {e}")
-        else:
-            print("提示: 未找到MobileSAM模型")
-            print("  如需选择物体功能，请运行: python scripts/download_all_models.py")
+        model_path = Path(__file__).parent.parent.parent / "models" / "sam2-hiera-tiny"
+        if not self._sam2_snapshot_ready(model_path):
+            print("提示: 未找到完整 SAM2 模型")
+            print(f"  期望位置: {model_path}")
+            print("  如需 AI 物体选择功能，请运行: python scripts/download_all_models.py")
+            return
 
-    def _load_sam_checkpoint(self, model_path: Path):
-        """直接加载SAM checkpoint（不依赖mobile_sam包）"""
-        # 这是一个简化的加载方式，当mobile_sam包不可用时使用
-        checkpoint = torch.load(str(model_path), map_location=self.device)
-        print(f"SAM checkpoint 加载成功，包含 {len(checkpoint)} 个键")
-        # 注意：完整功能需要mobile_sam包
+        try:
+            print(f"加载 SAM2 分割模型: {model_path}")
+            self.processor = Sam2Processor.from_pretrained(str(model_path), local_files_only=True)
+            self.model = Sam2Model.from_pretrained(str(model_path), local_files_only=True)
+            self.model.to(self.device)
+            self.model.eval()
+            print(f"SAM2 加载成功 (设备: {self.device})")
+        except Exception as e:
+            print(f"加载 SAM2 失败: {e}")
+            self.model = None
+            self.processor = None
 
     def set_image(self, image: np.ndarray):
         """
@@ -148,8 +156,11 @@ class ObjectSegmenter:
         self.current_image = image
         self._cached_image_hash = image_hash
         self._original_size = image.shape[:2]  # (H, W)
+        self._sam2_rgb_image = None
+        self._sam2_image_embeddings = None
+        self._sam2_original_sizes = None
 
-        if self.predictor is None:
+        if self.model is None or self.processor is None:
             return
 
         # 智能缩放: 大图自动缩小提速
@@ -167,8 +178,115 @@ class ObjectSegmenter:
             self._image_scale = 1.0
 
         # 转换为RGB并设置到predictor
-        rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
-        self.predictor.set_image(rgb_image)
+        self._sam2_rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
+
+        try:
+            inputs = self.processor(images=self._sam2_rgb_image, return_tensors="pt")
+            pixel_values = inputs["pixel_values"].to(self.device)
+            self._sam2_original_sizes = inputs.get("original_sizes")
+            with torch.inference_mode():
+                self._sam2_image_embeddings = self.model.get_image_embeddings(pixel_values)
+        except Exception as e:
+            print(f"SAM2 图像编码失败: {e}")
+            self._cached_image_hash = None
+            self._sam2_rgb_image = None
+            self._sam2_image_embeddings = None
+            self._sam2_original_sizes = None
+
+    @staticmethod
+    def _to_device(inputs, device: str):
+        """将 processor 输出中的张量移动到模型设备。"""
+        for key in ("pixel_values", "input_points", "input_labels", "input_boxes"):
+            value = inputs.get(key)
+            if hasattr(value, "to"):
+                inputs[key] = value.to(device)
+        return inputs
+
+    def _prepare_prompt_inputs(
+            self,
+            input_points=None,
+            input_labels=None,
+            input_boxes=None):
+        if self.processor is None or self._sam2_rgb_image is None:
+            return None
+
+        inputs = self.processor(
+            images=self._sam2_rgb_image,
+            input_points=input_points,
+            input_labels=input_labels,
+            input_boxes=input_boxes,
+            return_tensors="pt",
+        )
+        return self._to_device(inputs, self.device)
+
+    def _run_sam2_prediction(
+            self,
+            input_points=None,
+            input_labels=None,
+            input_boxes=None) -> Optional[np.ndarray]:
+        """执行 SAM2 提示分割并返回原图尺寸的 0/255 掩码。"""
+        if self.model is None or self.processor is None or self._sam2_image_embeddings is None:
+            return None
+
+        inputs = self._prepare_prompt_inputs(input_points, input_labels, input_boxes)
+        if inputs is None:
+            return None
+
+        model_inputs = {
+            "image_embeddings": self._sam2_image_embeddings,
+            "multimask_output": True,
+        }
+        for key in ("input_points", "input_labels", "input_boxes"):
+            if key in inputs:
+                model_inputs[key] = inputs[key]
+
+        with torch.inference_mode():
+            outputs = self.model(**model_inputs)
+
+        post_processed = self.processor.post_process_masks(
+            outputs.pred_masks,
+            inputs["original_sizes"],
+            binarize=False,
+        )
+        mask = self._select_best_mask(post_processed, outputs.iou_scores)
+        if mask is None:
+            return None
+
+        if self._image_scale != 1.0:
+            original_h, original_w = self._original_size
+            mask = cv2.resize(mask, (original_w, original_h), interpolation=cv2.INTER_LINEAR)
+
+        return ((mask > 0.0) * 255).astype(np.uint8)
+
+    @staticmethod
+    def _select_best_mask(post_processed_masks, iou_scores) -> Optional[np.ndarray]:
+        """从 SAM2 多掩码输出中选择 IoU 估计最高的掩码。"""
+        if not post_processed_masks:
+            return None
+
+        mask_tensor = post_processed_masks[0]
+        if hasattr(mask_tensor, "detach"):
+            mask_tensor = mask_tensor.detach().cpu()
+        mask_array = np.asarray(mask_tensor)
+
+        if mask_array.ndim == 2:
+            return mask_array.astype(np.float32)
+
+        height, width = mask_array.shape[-2:]
+        flattened_masks = mask_array.reshape(-1, height, width)
+        if flattened_masks.size == 0:
+            return None
+
+        best_idx = 0
+        if iou_scores is not None:
+            scores = iou_scores
+            if hasattr(scores, "detach"):
+                scores = scores.detach().cpu()
+            scores_array = np.asarray(scores).reshape(-1)
+            if scores_array.size == flattened_masks.shape[0]:
+                best_idx = int(np.argmax(scores_array))
+
+        return flattened_masks[best_idx].astype(np.float32)
 
     def segment_at_point(self, x: int, y: int) -> Optional[np.ndarray]:
         """
@@ -181,7 +299,7 @@ class ObjectSegmenter:
         Returns:
             分割掩码 (H, W), 值为0或255, 或None如果失败
         """
-        if self.predictor is None:
+        if not self.is_available():
             return self._segment_traditional(x, y)
 
         if self.current_image is None:
@@ -193,31 +311,11 @@ class ObjectSegmenter:
             scaled_y = int(y * self._image_scale)
 
             # 使用点击点作为输入提示
-            input_point = np.array([[scaled_x, scaled_y]])
-            input_label = np.array([1])  # 1表示前景点
-
-            # 多掩码输出: SAM生成3个质量不同的掩码
-            masks, scores, _ = self.predictor.predict(
-                point_coords=input_point,
-                point_labels=input_label,
-                multimask_output=True  # 输出3个掩码供选择
+            mask = self._run_sam2_prediction(
+                input_points=[[[[float(scaled_x), float(scaled_y)]]]],
+                input_labels=[[[1]]],
             )
-
-            # 选择得分最高的掩码
-            best_idx = np.argmax(scores)
-            mask = masks[best_idx]
-
-            # 上采样: 将掩码恢复到原始图像尺寸
-            if self._image_scale != 1.0:
-                original_h, original_w = self._original_size
-                mask = cv2.resize(
-                    mask.astype(np.uint8),
-                    (original_w, original_h),
-                    interpolation=cv2.INTER_LINEAR
-                ) > 0.5  # 二值化
-
-            # 转换为0-255
-            return (mask * 255).astype(np.uint8)
+            return mask if mask is not None else self._segment_traditional(x, y)
 
         except Exception as e:
             print(f"分割失败: {e}")
@@ -234,8 +332,8 @@ class ObjectSegmenter:
         Returns:
             分割掩码
         """
-        if self.predictor is None:
-            # 当SAM模型不可用时，使用传统方法（GrabCut）作为回退
+        if not self.is_available():
+            # 当 SAM2 模型不可用时，使用传统方法（GrabCut）作为回退
             return self._segment_traditional_box(x1, y1, x2, y2)
 
         if self.current_image is None:
@@ -250,25 +348,10 @@ class ObjectSegmenter:
                 int(y2 * self._image_scale)
             ])
 
-            # 多掩码输出
-            masks, scores, _ = self.predictor.predict(
-                box=scaled_box,
-                multimask_output=True
+            mask = self._run_sam2_prediction(
+                input_boxes=[[scaled_box.astype(float).tolist()]],
             )
-
-            best_idx = np.argmax(scores)
-            mask = masks[best_idx]
-
-            # 上采样: 将掩码恢复到原始图像尺寸
-            if self._image_scale != 1.0:
-                original_h, original_w = self._original_size
-                mask = cv2.resize(
-                    mask.astype(np.uint8),
-                    (original_w, original_h),
-                    interpolation=cv2.INTER_LINEAR
-                ) > 0.5
-
-            return (mask * 255).astype(np.uint8)
+            return mask if mask is not None else self._segment_traditional_box(x1, y1, x2, y2)
 
         except Exception as e:
             print(f"框选分割失败: {e}")
@@ -288,8 +371,8 @@ class ObjectSegmenter:
         if self.current_image is None or len(path_points) < 3:
             return None
 
-        # 如果SAM可用，使用路径内的点作为提示
-        if self.predictor is not None:
+        # 如果 SAM2 可用，使用路径内的点作为提示
+        if self.is_available():
             return self._segment_path_with_sam(path_points)
         else:
             # 使用传统方法
@@ -297,12 +380,12 @@ class ObjectSegmenter:
 
     def _segment_path_with_sam(self, path_points: list) -> Optional[np.ndarray]:
         """
-        使用SAM模型和路径分割物体
+        使用 SAM2 模型和路径分割物体
 
         策略：
         1. 在路径内部采样多个点作为正样本
-        2. 在路径外部采样点作为负样本
-        3. 使用SAM的点提示进行分割
+        2. 使用路径边界框增强定位
+        3. 与用户路径取交集，避免选择到路径外目标
         """
         try:
             # 创建路径掩码
@@ -328,35 +411,29 @@ class ObjectSegmenter:
 
             # 坐标缩放
             scaled_positive = (positive_points * self._image_scale).astype(np.int32)
+            x, y, box_w, box_h = cv2.boundingRect(pts)
+            scaled_box = np.array([
+                int(x * self._image_scale),
+                int(y * self._image_scale),
+                int((x + box_w) * self._image_scale),
+                int((y + box_h) * self._image_scale),
+            ], dtype=np.float32)
 
-            # 使用正样本点进行分割
-            input_labels = np.ones(len(scaled_positive), dtype=np.int32)
-
-            masks, scores, _ = self.predictor.predict(
-                point_coords=scaled_positive,
-                point_labels=input_labels,
-                multimask_output=True
+            mask = self._run_sam2_prediction(
+                input_points=[[scaled_positive.astype(float).tolist()]],
+                input_labels=[[np.ones(len(scaled_positive), dtype=np.int32).tolist()]],
+                input_boxes=[[scaled_box.tolist()]],
             )
-
-            best_idx = np.argmax(scores)
-            mask = masks[best_idx]
-
-            # 上采样回原始尺寸
-            if self._image_scale != 1.0:
-                original_h, original_w = self._original_size
-                mask = cv2.resize(
-                    mask.astype(np.uint8),
-                    (original_w, original_h),
-                    interpolation=cv2.INTER_LINEAR
-                ) > 0.5
+            if mask is None:
+                return self._segment_path_traditional(path_points)
 
             # 与路径掩码取交集（只保留路径内的部分）
-            mask = mask & (path_mask > 0)
+            mask = (mask > 127) & (path_mask > 0)
 
             return (mask * 255).astype(np.uint8)
 
         except Exception as e:
-            print(f"SAM路径分割失败: {e}")
+            print(f"SAM2 路径分割失败: {e}")
             return self._segment_path_traditional(path_points)
 
     def _segment_path_traditional(self, path_points: list) -> Optional[np.ndarray]:
@@ -495,7 +572,11 @@ class ObjectSegmenter:
 
     def is_available(self) -> bool:
         """检查分割器是否可用"""
-        return self.predictor is not None
+        return (
+            self.model is not None
+            and self.processor is not None
+            and self._sam2_image_embeddings is not None
+        )
 
 
 class DepthEstimator:
@@ -518,7 +599,13 @@ class DepthEstimator:
         self.session = None  # ONNX session
         self.depth_model = None  # Transformers model
         self.image_processor = None
-        self.device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu" if HAS_TRANSFORMERS else None
+        self.device = (
+            "cuda"
+            if HAS_TRANSFORMERS and use_gpu and torch is not None and torch.cuda.is_available()
+            else "cpu"
+            if HAS_TRANSFORMERS
+            else None
+        )
         self.input_size = (518, 518)  # Depth Anything default
 
         self._load_model()

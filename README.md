@@ -1,21 +1,27 @@
-# AI Image Processor (v1.0.0)
+# AI Image Processor (v1.2.0)
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 AI Image Processor is a desktop application for local AI-powered image workflows, including:
-- Natural-language color grading
-- Image library indexing and semantic retrieval
+- Natural-language color grading and reusable Look Presets
+- Image library indexing, semantic retrieval, and visual asset governance
 - Single-image and object-focused 3D generation
+- A modern PySide6 workbench with command center, canvas HUD, and command palette
 
-The project is designed for local/offline usage after model download, with a PySide6 GUI and modular AI backends.
+The project can run fully local/offline after model download, or use API-backed LLMs for the natural-language color workflow. It ships with a PySide6 GUI and modular AI backends.
 
 ## Key Features
 
-- Natural language color grading with rule-based parsing and optional local LLM analysis
-- Local image library management with semantic + visual feature search
+- Natural language color grading with rule-based parsing, optional local LLM analysis, or OpenAI/Anthropic/OpenAI-compatible API backends
+- Custom Look Presets for saving, applying, and managing repeatable grading styles
+- Local image library management with semantic, filename, and intent-aware visual feature search
+- Product-grade asset workflows: library health summaries, picker metrics, empty states, and manager detail panels
+- Modern command center, workflow panel, and Ctrl+K command palette for fast navigation
+- Canvas HUD with asset metadata, drag/drop import, compare state, empty state, and processing overlay
 - 3D mesh and animation generation from images (depth + segmentation workflow)
-- Object selection with MobileSAM (point/box/path interactions)
+- Object selection with SAM2 (point/box/path interactions)
+- Intent-aware color/background retrieval that balances CLIP semantics with dominant-color evidence
 - Chinese-path-safe image I/O utilities
 - Lazy/asynchronous model loading to reduce UI startup blocking
 
@@ -24,7 +30,7 @@ The project is designed for local/offline usage after model download, with a PyS
 - Language: Python 3.9+
 - GUI: PySide6 (Qt for Python)
 - Imaging: OpenCV, Pillow, scikit-image, NumPy
-- AI/ML: PyTorch, Transformers, Sentence-Transformers, ONNX Runtime, MobileSAM
+- AI/ML: PyTorch, Transformers, Sentence-Transformers, ONNX Runtime, SAM2
 - Retrieval/Storage: ChromaDB
 - 3D: Open3D, trimesh
 
@@ -41,15 +47,15 @@ AIImageProcessor/
 ├── src/
 │   ├── ai/
 │   ├── core/
-│   ├── mobile_sam/
 │   ├── ui/
 │   └── utils/
 ├── scripts/
-│   ├── setup.bat
-│   ├── setup.sh
 │   └── download_all_models.py
 ├── docs/
-└── submission/
+├── submission/
+├── data/              # local image indexes; ignored except placeholders
+├── models/            # downloaded model weights; ignored
+└── artifacts/         # generated screenshots/test artifacts; ignored
 ```
 
 ## Setup and Installation
@@ -104,22 +110,35 @@ python main.py --debug
 
 ## LLM Configuration (Optional)
 
-To enable local LLM analysis for color commands:
-1. Copy `llm_config.example.json` to `llm_config.json`
-2. Select one valid config block and simplify it to a single active config object
-3. Ensure corresponding model files are available locally
+To enable LLM analysis for color commands:
+1. Open the app's "模型配置" dialog and choose the natural-language color backend, or copy `llm_config.example.json` to `llm_config.json` for manual setup
+2. For `provider: "local"`, download the corresponding model files from the same dialog
+3. For API providers, set the API key environment variable such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`
 
 If `llm_config.json` is absent or disabled, the app falls back to non-LLM parsing.
 
-## Testing and Validation
+Supported LLM backends:
+- `local`: Transformers/HuggingFace model path or model ID
+- `openai`: OpenAI Chat Completions-compatible request format
+- `anthropic`: Anthropic Messages API request format
+- `openai-compatible`: local or third-party gateways that implement `/v1/chat/completions`
 
-This repository currently has no formal automated test suite.
+## Testing and Validation
 
 Recommended validation commands:
 ```bash
 python -m compileall -q main.py src scripts
+python -m unittest discover -s tests
 python main.py --check-deps
 ```
+
+The v1.2.0 UI/product pass includes automated core and PySide6 UI regression tests. The current suite covers:
+- color panel reset and Look Preset behavior
+- intent-aware image retrieval scoring for color/background searches
+- image viewer HUD, processing overlay, and canvas state
+- command center and command palette state
+- image library, picker, and manager selection/empty/error states
+- AGI camera selection/export state regressions
 
 ## Build / Packaging Notes
 
@@ -134,6 +153,7 @@ python main.py --check-deps
 
 Additional docs are available under `docs/`, including:
 - LLM quickstart and configuration guides
+- v1.2.0 product UI upgrade notes
 - performance and optimization notes
 - code review notes from previous iterations
 

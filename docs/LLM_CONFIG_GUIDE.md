@@ -1,124 +1,117 @@
-# LLM模型配置指南
+# LLM 模型与 API 配置指南
 
-## 快速开始
+应用内“模型配置”窗口现在可以直接配置一句话调色后端，并写入 `llm_config.json`。需要批量复制、部署或精细调整高级字段时，也可以手动编辑这个文件。
 
-是的，您可以**直接修改 `llm_config.json` 文件**来更换模型！
+`llm_config.json` 支持两类后端：
 
-### 步骤
+- `local`: 本地 Transformers/HuggingFace 模型，适合离线、隐私优先、已有显卡或本地权重的场景。
+- `openai` / `anthropic` / `openai-compatible`: 通过 API 调用大模型，适合不想下载本地 LLM、希望更快启用或接入企业网关的场景。
 
-1. **选择配置**: 从 `llm_config_examples.json` 中选择适合您硬件的配置
-2. **复制配置**: 将选中的配置复制到 `llm_config.json` 文件
-3. **重启程序**: 关闭并重新启动应用程序
+如果 `llm_config.json` 不存在，或配置为 `"enabled": false`，应用会自动回退到传统关键词解析。
 
-## 推荐配置
+## 快速选择
 
-### 🚀 推荐: 7B模型 (4-bit量化)
+API 路线不需要下载一句话调色 LLM，只需要设置环境变量：
+
+```powershell
+$env:OPENAI_API_KEY="sk-..."
+$env:ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+本地路线仍可使用模型配置窗口或下载脚本：
+
+```bash
+python scripts/download_all_models.py
+```
+
+在应用内配置时，进入“模型配置”：
+
+- 顶部“一句话调色后端”选择禁用、本地模型、OpenAI、Anthropic 或 OpenAI 兼容。
+- API 后端填写模型名、Base URL、API Key 等，然后点击“保存一句话调色配置”。
+- 本地模型后端在下方“一句话调色意图理解模型”选择默认或自定义模型，再下载缺失模型。
+
+## OpenAI API
+
 ```json
 {
   "enabled": true,
+  "provider": "openai",
+  "model": "",
+  "base_url": "https://api.openai.com/v1",
+  "timeout": 30,
+  "temperature": 0.65,
+  "max_tokens": 512
+}
+```
+
+## Anthropic API
+
+```json
+{
+  "enabled": true,
+  "provider": "anthropic",
+  "model": "",
+  "base_url": "https://api.anthropic.com",
+  "timeout": 30,
+  "temperature": 0.65,
+  "max_tokens": 512
+}
+```
+
+## OpenAI 兼容 API
+
+适用于 Ollama、LM Studio、vLLM、兼容 OpenAI Chat Completions 的第三方或企业网关。
+
+```json
+{
+  "enabled": true,
+  "provider": "openai-compatible",
+  "model": "",
+  "base_url": "",
+  "api_key_required": false,
+  "timeout": 30,
+  "temperature": 0.65,
+  "max_tokens": 512
+}
+```
+
+如果网关需要密钥，可填写 API Key，或手动编辑配置使用高级字段：
+
+```json
+{
+  "enabled": true,
+  "provider": "openai-compatible",
+  "model": "your-model-name",
+  "base_url": "https://your-gateway.example.com/v1",
+  "api_key": "sk-..."
+}
+```
+
+## 本地模型
+
+旧配置仍然可用；未写 `provider` 时默认等同于 `"provider": "local"`。
+
+轻量配置：
+
+```json
+{
+  "enabled": true,
+  "provider": "local",
+  "model_name": "Qwen/Qwen2.5-1.5B-Instruct",
+  "device": "auto",
+  "trust_remote_code": false
+}
+```
+
+7B 4-bit 量化配置：
+
+```json
+{
+  "enabled": true,
+  "provider": "local",
   "model_name": "Qwen/Qwen2.5-7B-Instruct",
   "device": "auto",
-  "quantization": {
-    "enabled": true,
-    "bits": 4,
-    "compute_dtype": "float16"
-  }
-}
-```
-**适用场景**: 8GB+ 显存，平衡性能与效果  
-**显存占用**: 约 4-5GB
-
----
-
-### 💪 进阶: 14B模型 (4-bit量化)
-```json
-{
-  "enabled": true,
-  "model_name": "Qwen/Qwen2.5-14B-Instruct",
-  "device": "auto",
-  "quantization": {
-    "enabled": true,
-    "bits": 4,
-    "compute_dtype": "float16"
-  },
-  "max_memory": {
-    "0": "10GB",
-    "cpu": "20GB"
-  }
-}
-```
-**适用场景**: 12GB+ 显存，追求最佳效果  
-**显存占用**: 约 8-10GB
-
----
-
-### 🔥 旗舰: 32B模型 (4-bit量化)
-```json
-{
-  "enabled": true,
-  "model_name": "Qwen/Qwen2.5-32B-Instruct",
-  "device": "auto",
-  "quantization": {
-    "enabled": true,
-    "bits": 4,
-    "compute_dtype": "bfloat16"
-  },
-  "max_memory": {
-    "0": "20GB",
-    "cpu": "40GB"
-  },
-  "offload_folder": "./model_offload"
-}
-```
-**适用场景**: 24GB+ 显存，最强性能  
-**显存占用**: 约 18-20GB
-
----
-
-### 💾 轻量: 1.5B模型 (当前默认)
-```json
-{
-  "enabled": true,
-  "model_name": "Qwen/Qwen2.5-1.5B-Instruct",
-  "device": "auto"
-}
-```
-**适用场景**: 低显存设备  
-**显存占用**: 约 2GB
-
----
-
-## 参数说明
-
-| 参数 | 说明 | 可选值 |
-|------|------|--------|
-| `enabled` | 是否启用LLM | `true` / `false` |
-| `model_name` | 模型名称 | Qwen系列或本地路径 |
-| `device` | 运行设备 | `auto` / `cuda` / `cpu` |
-| `quantization.enabled` | 是否量化 | `true` / `false` |
-| `quantization.bits` | 量化位数 | `4` (更省显存) / `8` (更高精度) |
-| `quantization.compute_dtype` | 计算精度 | `float16` / `bfloat16` |
-| `max_memory` | 显存限制 | 如 `{"0": "10GB", "cpu": "20GB"}` |
-| `offload_folder` | CPU卸载目录 | 文件夹路径 |
-
-## 可用的Qwen模型
-
-- `Qwen/Qwen2.5-1.5B-Instruct` - 1.5B参数 (最轻量)
-- `Qwen/Qwen2.5-3B-Instruct` - 3B参数
-- `Qwen/Qwen2.5-7B-Instruct` - 7B参数 (推荐)
-- `Qwen/Qwen2.5-14B-Instruct` - 14B参数 (高性能)
-- `Qwen/Qwen2.5-32B-Instruct` - 32B参数 (旗舰)
-- `Qwen/Qwen2.5-72B-Instruct` - 72B参数 (超旗舰，需多卡或大量CPU卸载)
-
-## 使用本地模型
-
-如果您已经下载了模型到本地，可以直接指定路径：
-
-```json
-{
-  "enabled": true,
-  "model_name": "/path/to/models/Qwen2.5-7B-Instruct",
-  "device": "cuda",
+  "trust_remote_code": false,
   "quantization": {
     "enabled": true,
     "bits": 4,
@@ -127,79 +120,54 @@
 }
 ```
 
-## 显存不足？
+## 字段说明
 
-### 方案1: 使用更小的模型
-- 从 7B → 3B → 1.5B
-
-### 方案2: 启用更激进的量化
-```json
-{
-  "quantization": {
-    "enabled": true,
-    "bits": 4,  // 从8改为4
-    "compute_dtype": "float16"
-  }
-}
-```
-
-### 方案3: 限制显存使用 + CPU卸载
-```json
-{
-  "max_memory": {
-    "0": "6GB",     // 限制GPU显存
-    "cpu": "16GB"   // 允许CPU内存
-  },
-  "offload_folder": "./model_offload"  // 启用CPU卸载
-}
-```
-
-### 方案4: 使用CPU（慢但可用）
-```json
-{
-  "enabled": true,
-  "model_name": "Qwen/Qwen2.5-1.5B-Instruct",
-  "device": "cpu"
-}
-```
-
-## 首次使用注意事项
-
-1. **自动下载**: 首次使用会从 HuggingFace 自动下载模型
-2. **耐心等待**: 模型较大(7B约14GB)，下载需要一些时间
-3. **网络环境**: 建议配置 HuggingFace 镜像加速
-4. **磁盘空间**: 确保有足够的磁盘空间存储模型
+| 字段 | 适用后端 | 说明 |
+|------|----------|------|
+| `enabled` | 全部 | 是否启用 LLM；`false` 时使用传统关键词匹配 |
+| `provider` | 全部 | `local`、`openai`、`anthropic`、`openai-compatible` |
+| `model_name` | local | HuggingFace 模型名或本地路径 |
+| `model` | API | API 服务商或兼容网关中的模型名；窗口默认留空，需要手动填写 |
+| `api_key` | API | 直接写入 Key；仅本机临时测试使用，不要提交。留空时使用服务商默认环境变量 |
+| `api_key_required` | API | 本地兼容网关无需 Key 时设为 `false` |
+| `base_url` | API | API 基础地址；OpenAI 兼容服务通常以 `/v1` 结尾，窗口默认留空 |
+| `endpoint` | API | 可选，自定义路径或完整 URL |
+| `timeout` | API | 请求超时秒数 |
+| `temperature` | API | 生成随机性；设为 `null` 可不发送 |
+| `max_tokens` | API | 最大输出 token 数 |
+| `headers` | API | 自定义请求头 |
+| `response_format` | OpenAI 格式 | 可选响应格式配置 |
+| `extra_body` | API | 合并到请求 JSON 的附加字段 |
+| `device` | local | `auto` / `cuda` / `cpu` |
+| `quantization` | local | 4-bit/8-bit 量化配置 |
+| `max_memory` | local | 显存/内存上限 |
+| `offload_folder` | local | CPU 卸载目录 |
+| `trust_remote_code` | local | 是否执行模型仓库自定义代码，默认建议 `false` |
 
 ## 故障排除
 
-### Q: 显存不足错误？
-A: 使用更小的模型或启用4-bit量化
+API 报未配置 Key：
 
-### Q: 模型下载失败？
-A: 检查网络连接，或手动下载模型到本地后指定路径
+- 确认已设置服务商默认环境变量，例如 `OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY`。
+- PowerShell 当前窗口设置的变量只对当前窗口有效，重开终端后需要重新设置。
+- 本地兼容网关不需要密钥时，把 `api_key_required` 设为 `false`。
 
-### Q: 程序启动慢？
-A: 正常现象，大模型加载需要时间。首次启动会更慢(下载+加载)
+API 返回无法解析：
 
-### Q: 想恢复默认？
-A: 将配置改为：
+- 确认网关兼容 OpenAI `/v1/chat/completions` 或 Anthropic `/v1/messages`。
+- 调高 `timeout`，或检查网关日志。
+- 模型必须返回 JSON；应用会尽量从文本中提取第一个 JSON 对象。
+
+本地显存不足：
+
+- 使用更小模型，例如 7B -> 3B -> 1.5B。
+- 开启 4-bit 量化。
+- 改用 `device: "cpu"`，或切换到 API 后端。
+
+恢复传统解析：
+
 ```json
 {
   "enabled": false
 }
 ```
-
-## 性能对比
-
-| 模型 | 参数量 | 4-bit显存 | 推理速度 | 效果 |
-|------|--------|-----------|----------|------|
-| 1.5B | 1.5B | ~2GB | ⚡⚡⚡⚡⚡ | ⭐⭐⭐ |
-| 3B | 3B | ~3GB | ⚡⚡⚡⚡ | ⭐⭐⭐⭐ |
-| 7B | 7B | ~5GB | ⚡⚡⚡ | ⭐⭐⭐⭐⭐ |
-| 14B | 14B | ~9GB | ⚡⚡ | ⭐⭐⭐⭐⭐⭐ |
-| 32B | 32B | ~18GB | ⚡ | ⭐⭐⭐⭐⭐⭐⭐ |
-
----
-
-**建议**: 从推荐的 **7B模型(4-bit量化)** 开始尝试，它在性能和效果之间有很好的平衡！
-

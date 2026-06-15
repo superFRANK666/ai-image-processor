@@ -2,7 +2,9 @@
 主窗口
 AI全模态影像处理软件主界面
 """
+import logging
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 import numpy as np
@@ -13,10 +15,11 @@ from ..utils.image_io import imread as imread_safe, imwrite as imwrite_safe
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTabWidget, QToolBar, QStatusBar, QFileDialog, QMessageBox,
-    QProgressBar, QLabel, QApplication, QScrollArea
+    QProgressBar, QLabel, QApplication, QScrollArea, QInputDialog,
+    QPushButton, QFrame
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QTimer
-from PySide6.QtGui import QAction, QKeySequence, QFont
+from PySide6.QtGui import QAction, QKeySequence
 
 from .image_viewer import ImageViewer
 from .color_grading_panel import ColorGradingPanel
@@ -24,15 +27,69 @@ from .agi_camera_panel import AGICameraPanel
 from .image_library_panel import ImageLibraryPanel
 from .library_manager_dialog import LibraryManagerDialog
 from .image_picker_dialog import pick_images
+from .command_palette import CommandDefinition, CommandPalette
+from .font_utils import apply_application_font
+from .model_config_dialog import ModelConfigDialog
 from .style_sheet import get_dark_style
+from .workflow_panel import WorkflowMetrics, WorkflowPanel
 
 # 导入配置 (使用相对导入)
 from ..core.config import UI_CONFIG, SUPPORTED_FORMATS, IMAGE_INDEX_DIR, APP_VERSION
+from ..core.look_preset_store import LookPresetStore
 from ..core.model_manager import ModelManager
 
 # 延迟导入 AI 模块（类型检查时导入,运行时延迟）
 if TYPE_CHECKING:
     from ..ai import ColorGradingEngine, NLPColorParser, AGICamera, ImageIndexDatabase, StyleAnalyzer
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BatchOperationResult:
+    """Result summary for image import/index batch jobs."""
+    total: int
+    success: int = 0
+    failures: list[str] = field(default_factory=list)
+    canceled: bool = False
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.failures)
+
+    @property
+    def has_issues(self) -> bool:
+        return self.canceled or self.failed_count > 0
+
+    def add_failure(self, path, error):
+        label = Path(path).name or str(path)
+        self.failures.append(f"{label}: {error}")
+
+    def status_message(self, action: str) -> str:
+        parts = [f"{action}: 成功 {self.success}/{self.total} 张"]
+        if self.failed_count:
+            parts.append(f"失败 {self.failed_count} 张")
+        if self.canceled:
+            parts.append("已取消")
+        return "，".join(parts)
+
+    def detail_message(self, action: str) -> str:
+        lines = [
+            f"{action}完成。",
+            f"成功: {self.success}/{self.total} 张",
+        ]
+        if self.failed_count:
+            lines.append(f"失败: {self.failed_count} 张")
+        if self.canceled:
+            lines.append("状态: 已取消")
+        if self.failures:
+            lines.append("")
+            lines.append("失败详情:")
+            lines.extend(self.failures[:5])
+            if self.failed_count > 5:
+                lines.append(f"...另有 {self.failed_count - 5} 张失败")
+        return "\n".join(lines)
 
 
 class ProcessingThread(QThread):
@@ -55,7 +112,7 @@ class ProcessingThread(QThread):
             result = self.func(*self.args, **self.kwargs)
             if not self._stop_requested:
                 self.finished.emit(result)
-        except (RuntimeError, ValueError, OSError, ImportError) as e:
+        except Exception as e:
             # 捕获常见的应用程序错误,不捕获系统信号
             if not self._stop_requested:
                 self.error.emit(str(e))
@@ -69,12 +126,19 @@ class ProcessingThread(QThread):
         """请求线程停止"""
         self._stop_requested = True
 
+    @property
+    def stop_requested(self) -> bool:
+        """是否已请求停止。"""
+        return self._stop_requested
+
 
 class MainWindow(QMainWindow):
     """主窗口"""
 
     # 历史记录最大数量
     MAX_HISTORY = 20
+    _text_params_ready = Signal(object)
+    _text_parse_failed = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -84,15 +148,20 @@ class MainWindow(QMainWindow):
         self.original_image: Optional[np.ndarray] = None
         self.current_file_path: Optional[str] = None
         self.thread: Optional[ProcessingThread] = None
+        self._canvas_status = "等待素材"
+        self._canvas_detail = "打开或拖入素材开始处理。"
+        self._text_analysis_busy = False
 
         # 历史记录栈（用于撤销功能）
         # 每个记录包含: {'image': np.ndarray, 'params': ColorGradingParams}
         self._history_stack = []
         self._current_params = None  # 当前调色参数
+        self._grading_history_pending = False
 
         # 使用 ModelManager 统一管理 AI 模型
         self.model_manager = ModelManager(self)
         self._register_models()
+        self.look_store = LookPresetStore()
 
         # AI引擎引用（通过 ModelManager 获取）
         self.color_engine: Optional[ColorGradingEngine] = None
@@ -109,16 +178,16 @@ class MainWindow(QMainWindow):
         # 设置UI
         self._setup_ui()
         self._setup_menu()
-        self._setup_toolbar()
         self._setup_statusbar()
         self._connect_signals()
+        self._refresh_look_presets()
+        self._update_action_states()
 
         # 应用样式
         self.setStyleSheet(get_dark_style())
 
-        # 延迟加载图像数据库（在窗口显示后加载，避免阻塞启动）
-        # 从100ms增加到1000ms，让窗口先显示，用户体验更好
-        QTimer.singleShot(1000, self._deferred_init)
+        # 延迟加载图像数据库：先让主窗口完成首屏渲染，再后台初始化检索能力。
+        QTimer.singleShot(1200, self._deferred_init)
 
     def _register_models(self):
         """注册所有 AI 模型到 ModelManager"""
@@ -175,8 +244,9 @@ class MainWindow(QMainWindow):
         if not self.image_db:
             self.image_db = self.model_manager.get_model('image_db')
             if not self.image_db:
-                self.model_manager.load_model_sync('image_db')
-                self.image_db = self.model_manager.get_model('image_db')
+                self.image_db = self.model_manager.load_model_sync('image_db')
+        if not self.image_db:
+            raise RuntimeError("图像数据库未加载，无法创建风格分析器")
         return StyleAnalyzer(self.image_db.feature_extractor)
 
     def _on_loading_started(self, model_name: str):
@@ -190,6 +260,9 @@ class MainWindow(QMainWindow):
         }
         display_name = display_names.get(model_name, model_name)
         self.statusbar.showMessage(f"正在加载{display_name}...")
+        if hasattr(self, 'workflow_panel'):
+            self.workflow_panel.update_model_state(model_name, "加载中")
+            self._workflow_activity(f"开始加载 {display_name}")
 
     def _on_model_loaded(self, model_name: str):
         """模型加载完成时的回调"""
@@ -221,30 +294,50 @@ class MainWindow(QMainWindow):
             self.style_analyzer = model
 
         self.statusbar.showMessage(f"{display_name}已加载", 2000)
+        if hasattr(self, 'workflow_panel'):
+            self.workflow_panel.update_model_state(model_name, "就绪")
+            self._workflow_activity(f"{display_name}已就绪")
+        self._refresh_workflow_panel()
 
     def _on_model_failed(self, model_name: str, error_msg: str):
         """模型加载失败时的回调"""
         QMessageBox.warning(self, "模型加载失败", f"加载 {model_name} 时出错:\n{error_msg}")
         self.statusbar.showMessage(f"加载 {model_name} 失败", 3000)
+        if hasattr(self, 'workflow_panel'):
+            self.workflow_panel.update_model_state(model_name, "失败")
+            self._workflow_activity(f"{model_name} 加载失败")
+        self._refresh_workflow_panel()
 
-    def _ensure_model(self, model_name: str):
+    def _ensure_model(self, model_name: str) -> bool:
         """确保模型已加载（同步方式,会阻塞）"""
         if not self.model_manager.is_loaded(model_name):
             self.model_manager.load_model_sync(model_name)
 
         # 同步加载后手动更新实例引用(因为同步加载不会触发信号)
         model = self.model_manager.get_model(model_name)
-        if model:
-            if model_name == 'color_engine':
-                self.color_engine = model
-            elif model_name == 'nlp_parser':
-                self.nlp_parser = model
-            elif model_name == 'agi_camera':
-                self.agi_camera = model
-            elif model_name == 'image_db':
-                self.image_db = model
-            elif model_name == 'style_analyzer':
-                self.style_analyzer = model
+        if not model:
+            self.statusbar.showMessage(f"模型 {model_name} 加载失败", 3000)
+            return False
+
+        if model_name == 'color_engine':
+            self.color_engine = model
+        elif model_name == 'nlp_parser':
+            self.nlp_parser = model
+        elif model_name == 'agi_camera':
+            self.agi_camera = model
+        elif model_name == 'image_db':
+            self.image_db = model
+            if hasattr(self, 'library_panel'):
+                self.library_panel.set_database(self.image_db)
+            if hasattr(self, 'agi_panel'):
+                self.agi_panel.set_database(self.image_db)
+        elif model_name == 'style_analyzer':
+            self.style_analyzer = model
+
+        if hasattr(self, 'workflow_panel'):
+            self.workflow_panel.update_model_state(model_name, "就绪")
+        self._refresh_workflow_panel()
+        return True
 
     def _ensure_model_async(self, model_name: str):
         """确保模型已加载（异步方式,不阻塞）"""
@@ -256,6 +349,7 @@ class MainWindow(QMainWindow):
         # 后台异步加载图像数据库（不阻塞UI）
         self.statusbar.showMessage("正在后台加载图像数据库...", 2000)
         self.model_manager.load_model_async('image_db')
+        self._refresh_workflow_panel()
 
     def _background_load_db(self):
         """后台加载数据库（已弃用,使用 ModelManager 替代）"""
@@ -273,9 +367,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
         # 主布局
-        main_layout = QHBoxLayout(central_widget)
+        main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
+        self._setup_command_center(main_layout)
 
         # 分割器
         splitter = QSplitter(Qt.Horizontal)
@@ -285,10 +380,15 @@ class MainWindow(QMainWindow):
         self.image_viewer = ImageViewer()
         splitter.addWidget(self.image_viewer)
 
-        # 右侧: 功能面板
+        # 右侧: 产品工作台 + 功能面板
         right_panel = QTabWidget()
-        right_panel.setMinimumWidth(450)  # 增大最小宽度以容纳更大的预览区域
-        right_panel.setMaximumWidth(600)  # 增大最大宽度
+        right_panel.setObjectName("rightWorkflowTabs")
+        right_panel.setMinimumWidth(480)
+        right_panel.setMaximumWidth(640)
+        self.right_panel = right_panel
+
+        self.workflow_panel = WorkflowPanel()
+        right_panel.addTab(self.workflow_panel, "工作台")
 
         # 调色面板
         self.color_panel = ColorGradingPanel()
@@ -301,6 +401,7 @@ class MainWindow(QMainWindow):
         agi_scroll.setWidget(self.agi_panel)
         agi_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         agi_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.agi_scroll = agi_scroll
         right_panel.addTab(agi_scroll, "AGI相机")
 
         # 图像库面板 (数据库延迟加载)
@@ -310,9 +411,90 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right_panel)
 
         # 设置分割比例
-        splitter.setSizes([800, 500])
+        splitter.setSizes([820, 520])
 
         # 底部停靠窗口逻辑已移除
+
+    def _setup_command_center(self, parent_layout: QVBoxLayout):
+        """构建应用内顶部命令中心。"""
+        command_bar = QFrame()
+        command_bar.setObjectName("commandCenter")
+        command_layout = QHBoxLayout(command_bar)
+        command_layout.setContentsMargins(14, 10, 14, 10)
+        command_layout.setSpacing(12)
+
+        brand = QVBoxLayout()
+        brand.setContentsMargins(0, 0, 0, 0)
+        brand.setSpacing(2)
+        self.command_title_label = QLabel("AI Image Processor")
+        self.command_title_label.setObjectName("commandTitle")
+        self.command_subtitle_label = QLabel("智能影像工作台")
+        self.command_subtitle_label.setObjectName("commandSubtitle")
+        brand.addWidget(self.command_title_label)
+        brand.addWidget(self.command_subtitle_label)
+        command_layout.addLayout(brand)
+
+        divider = QFrame()
+        divider.setObjectName("commandDivider")
+        divider.setFixedWidth(1)
+        command_layout.addWidget(divider)
+
+        asset = QVBoxLayout()
+        asset.setContentsMargins(0, 0, 0, 0)
+        asset.setSpacing(2)
+        self.command_asset_label = QLabel("未加载素材")
+        self.command_asset_label.setObjectName("commandAsset")
+        self.command_meta_label = QLabel("打开或拖入素材开始处理")
+        self.command_meta_label.setObjectName("commandMeta")
+        asset.addWidget(self.command_asset_label)
+        asset.addWidget(self.command_meta_label)
+        command_layout.addLayout(asset, 1)
+
+        self.command_status_badge = QLabel("等待素材")
+        self.command_status_badge.setObjectName("commandStatusBadge")
+        command_layout.addWidget(self.command_status_badge)
+
+        self.command_palette_btn = self._make_command_button("命令", self.open_command_palette)
+        self.command_open_btn = self._make_command_button("打开素材", self.open_image, "primary")
+        self.command_grade_btn = self._make_command_button("智能调色", self._focus_color_workflow)
+        self.command_agi_btn = self._make_command_button("AGI相机", self._focus_agi_workflow)
+        self.command_library_btn = self._make_command_button("图像库", self._focus_library_workflow)
+        self.command_save_btn = self._make_command_button("保存", self.save_image)
+        self.command_compare_btn = self._make_command_button(
+            "对比",
+            self._on_command_compare_toggled,
+            pass_checked=True,
+        )
+        self.command_compare_btn.setCheckable(True)
+
+        for button in (
+            self.command_palette_btn,
+            self.command_open_btn,
+            self.command_grade_btn,
+            self.command_agi_btn,
+            self.command_library_btn,
+            self.command_save_btn,
+            self.command_compare_btn,
+        ):
+            command_layout.addWidget(button)
+
+        parent_layout.addWidget(command_bar)
+
+    def _make_command_button(
+            self,
+            text: str,
+            callback,
+            variant: str = "secondary",
+            pass_checked: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName("commandButton")
+        button.setProperty("variant", variant)
+        button.setMinimumHeight(32)
+        if pass_checked:
+            button.clicked.connect(callback)
+        else:
+            button.clicked.connect(lambda _checked=False: callback())
+        return button
 
     def _setup_menu(self):
         """设置菜单栏"""
@@ -332,15 +514,22 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        save_action = QAction("保存(&S)", self)
-        save_action.setShortcut(QKeySequence.Save)
-        save_action.triggered.connect(self.save_image)
-        file_menu.addAction(save_action)
+        self.save_action = QAction("保存(&S)", self)
+        self.save_action.setShortcut(QKeySequence.Save)
+        self.save_action.triggered.connect(self.save_image)
+        file_menu.addAction(self.save_action)
 
-        save_as_action = QAction("另存为...", self)
-        save_as_action.setShortcut(QKeySequence.SaveAs)
-        save_as_action.triggered.connect(self.save_image_as)
-        file_menu.addAction(save_as_action)
+        self.save_as_action = QAction("另存为...", self)
+        self.save_as_action.setShortcut(QKeySequence.SaveAs)
+        self.save_as_action.triggered.connect(self.save_image_as)
+        file_menu.addAction(self.save_as_action)
+
+        file_menu.addSeparator()
+
+        exit_action = QAction("退出(&X)", self)
+        exit_action.setShortcut(QKeySequence.Quit)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
 
         file_menu.addSeparator()
 
@@ -352,15 +541,15 @@ class MainWindow(QMainWindow):
         # 编辑菜单
         edit_menu = menubar.addMenu("编辑(&E)")
 
-        undo_action = QAction("撤销(&Z)", self)
-        undo_action.setShortcut(QKeySequence.Undo)
-        undo_action.triggered.connect(self.undo)
-        edit_menu.addAction(undo_action)
+        self.undo_action = QAction("撤销(&Z)", self)
+        self.undo_action.setShortcut(QKeySequence.Undo)
+        self.undo_action.triggered.connect(self.undo)
+        edit_menu.addAction(self.undo_action)
 
-        reset_action = QAction("重置", self)
-        reset_action.setShortcut("Ctrl+R")
-        reset_action.triggered.connect(self.reset_image)
-        edit_menu.addAction(reset_action)
+        self.reset_action = QAction("重置", self)
+        self.reset_action.setShortcut("Ctrl+R")
+        self.reset_action.triggered.connect(self.reset_image)
+        edit_menu.addAction(self.reset_action)
 
         # 视图菜单
         view_menu = menubar.addMenu("视图(&V)")
@@ -381,17 +570,28 @@ class MainWindow(QMainWindow):
         view_menu.addAction(fit_action)
 
         view_menu.addSeparator()
+
+        self.command_palette_action = QAction("命令面板...", self)
+        self.command_palette_action.setShortcut("Ctrl+K")
+        self.command_palette_action.triggered.connect(self.open_command_palette)
+        view_menu.addAction(self.command_palette_action)
         
         manage_library_action = QAction("管理图像库...", self)
         manage_library_action.triggered.connect(self.open_library_manager)
         view_menu.addAction(manage_library_action)
 
-        # 帮助菜单
-        help_menu = menubar.addMenu("帮助(&H)")
+        # 设置菜单
+        self.settings_menu = menubar.addMenu("设置(&S)")
+
+        model_config_action = QAction("模型配置", self)
+        model_config_action.triggered.connect(self.open_model_config)
+        self.settings_menu.addAction(model_config_action)
+
+        self.settings_menu.addSeparator()
 
         about_action = QAction("关于", self)
         about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
+        self.settings_menu.addAction(about_action)
 
     def _setup_toolbar(self):
         """设置工具栏"""
@@ -407,24 +607,24 @@ class MainWindow(QMainWindow):
         toolbar.addAction(open_btn)
 
         # 保存
-        save_btn = QAction("保存", self)
-        save_btn.setToolTip("保存图像 (Ctrl+S)")
-        save_btn.triggered.connect(self.save_image)
-        toolbar.addAction(save_btn)
+        self.save_toolbar_action = QAction("保存", self)
+        self.save_toolbar_action.setToolTip("保存图像 (Ctrl+S)")
+        self.save_toolbar_action.triggered.connect(self.save_image)
+        toolbar.addAction(self.save_toolbar_action)
 
         toolbar.addSeparator()
 
         # 撤销
-        undo_btn = QAction("撤销", self)
-        undo_btn.setToolTip("撤销 (Ctrl+Z)")
-        undo_btn.triggered.connect(self.undo)
-        toolbar.addAction(undo_btn)
+        self.undo_toolbar_action = QAction("撤销", self)
+        self.undo_toolbar_action.setToolTip("撤销 (Ctrl+Z)")
+        self.undo_toolbar_action.triggered.connect(self.undo)
+        toolbar.addAction(self.undo_toolbar_action)
 
         # 重置
-        reset_btn = QAction("重置", self)
-        reset_btn.setToolTip("重置到原始图像 (Ctrl+R)")
-        reset_btn.triggered.connect(self.reset_image)
-        toolbar.addAction(reset_btn)
+        self.reset_toolbar_action = QAction("重置", self)
+        self.reset_toolbar_action.setToolTip("重置到原始图像 (Ctrl+R)")
+        self.reset_toolbar_action.triggered.connect(self.reset_image)
+        toolbar.addAction(self.reset_toolbar_action)
 
         toolbar.addSeparator()
 
@@ -453,11 +653,19 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         """连接信号"""
+        # 文本调色分析可能从后台线程返回，通过主窗口信号回到 UI 线程后再更新控件与应用调色。
+        self._text_params_ready.connect(self._apply_text_color_params, Qt.QueuedConnection)
+        self._text_parse_failed.connect(self._handle_text_parse_error, Qt.QueuedConnection)
+
         # 调色面板信号
         self.color_panel.params_changed.connect(self.apply_color_grading)
         self.color_panel.text_input_submitted.connect(self.process_text_command)
         self.color_panel.find_similar_requested.connect(self.find_similar_images)
         self.color_panel.upload_reference_requested.connect(self.upload_and_apply_reference)
+        self.color_panel.look_apply_requested.connect(self.apply_look_preset)
+        self.color_panel.save_look_requested.connect(self.save_current_look_preset)
+        self.color_panel.reset_all_requested.connect(self.reset_image)  # 恢复原图
+
 
         # AGI相机信号
         self.agi_panel.generate_3d_requested.connect(self.generate_3d)
@@ -470,10 +678,371 @@ class MainWindow(QMainWindow):
         self.agi_panel.export_3d_model_requested.connect(self.export_3d_model)
 
         # 图像库信号
-        # 图像库信号
         self.library_panel.image_selected.connect(self.load_reference_image)
         self.library_panel.import_requested.connect(self.import_images)
 
+        # 工作台信号
+        self.workflow_panel.open_image_requested.connect(self.open_image)
+        self.workflow_panel.import_images_requested.connect(self._open_import_workflow)
+        self.workflow_panel.grade_requested.connect(self._focus_color_workflow)
+        self.workflow_panel.find_similar_requested.connect(self.find_similar_images)
+        self.workflow_panel.generate_3d_requested.connect(self._focus_agi_workflow)
+        self.workflow_panel.save_requested.connect(self.save_image)
+        self.image_viewer.open_requested.connect(self.open_image)
+        self.image_viewer.import_requested.connect(self._open_import_workflow)
+        self.image_viewer.image_dropped.connect(self.load_image)
+        self.image_viewer.compare_toggled.connect(self.toggle_compare)
+
+    def _set_compare_checked(self, checked: bool):
+        """同步对比按钮状态，避免切换图片时保留旧图对比。"""
+        image_viewer = getattr(self, 'image_viewer', None)
+        if image_viewer is not None and hasattr(image_viewer, 'compare_btn'):
+            image_viewer.compare_btn.blockSignals(True)
+            image_viewer.compare_btn.setChecked(checked)
+            image_viewer.compare_btn.blockSignals(False)
+        toolbar_compare = getattr(self, 'compare_btn', None)
+        if toolbar_compare is not None:
+            toolbar_compare.blockSignals(True)
+            toolbar_compare.setChecked(checked)
+            toolbar_compare.blockSignals(False)
+        if hasattr(self, 'command_compare_btn'):
+            self.command_compare_btn.blockSignals(True)
+            self.command_compare_btn.setChecked(checked)
+            self.command_compare_btn.blockSignals(False)
+
+    def _update_action_states(self):
+        """根据当前上下文更新菜单和工具栏可用状态。"""
+        has_image = self.current_image is not None
+        has_history = bool(self._history_stack)
+        for action_name in (
+            'save_action', 'save_as_action', 'reset_action',
+            'save_toolbar_action', 'reset_toolbar_action', 'compare_btn'
+        ):
+            action = getattr(self, action_name, None)
+            if action is not None:
+                action.setEnabled(has_image)
+
+        for action_name in ('undo_action', 'undo_toolbar_action'):
+            action = getattr(self, action_name, None)
+            if action is not None:
+                action.setEnabled(has_history)
+
+        for button_name in (
+            'command_grade_btn', 'command_agi_btn',
+            'command_save_btn', 'command_compare_btn'
+        ):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(has_image)
+
+        if not has_image:
+            self._set_compare_checked(False)
+        if hasattr(self, 'color_panel'):
+            self.color_panel.set_image_available(has_image)
+        if hasattr(self, 'agi_panel'):
+            self.agi_panel.set_image_available(has_image)
+        self._refresh_workflow_panel()
+
+    def _refresh_workflow_panel(self):
+        """同步工作台概览状态。"""
+        if not hasattr(self, 'workflow_panel'):
+            return
+
+        width = height = 0
+        if self.current_image is not None:
+            height, width = self.current_image.shape[:2]
+
+        library_count = None
+        if self.image_db is not None:
+            try:
+                library_count = self.image_db.get_image_count()
+            except Exception:
+                library_count = None
+
+        metrics = WorkflowMetrics(
+            file_path=self.current_file_path if self.current_image is not None else None,
+            width=width,
+            height=height,
+            history_count=len(self._history_stack),
+            library_count=library_count,
+            has_mesh=self.agi_panel.get_current_mesh() is not None if hasattr(self, 'agi_panel') else False,
+            has_animation=self.agi_panel.has_animation_frames() if hasattr(self, 'agi_panel') else False,
+            has_selection=self.agi_panel.has_selection() if hasattr(self, 'agi_panel') else False,
+        )
+        self.workflow_panel.update_metrics(metrics)
+
+        loading = [
+            model_name for model_name in self.workflow_panel.MODEL_LABELS
+            if self.model_manager.is_loading(model_name)
+        ]
+        self.workflow_panel.sync_model_states(
+            loaded=self.model_manager.get_loaded_models(),
+            loading=loading,
+        )
+        if hasattr(self, 'image_viewer'):
+            self.image_viewer.set_canvas_context(
+                file_path=metrics.file_path,
+                width=width,
+                height=height,
+                history_count=metrics.history_count,
+                library_count=library_count,
+                status=getattr(self, '_canvas_status', "等待素材"),
+                detail=getattr(self, '_canvas_detail', "打开或拖入素材开始处理。"),
+            )
+        self._refresh_command_center(metrics, library_count)
+
+    def _refresh_command_center(
+            self,
+            metrics: Optional[WorkflowMetrics] = None,
+            library_count: Optional[int] = None):
+        """刷新顶部命令中心的素材和状态摘要。"""
+        if not hasattr(self, 'command_asset_label'):
+            return
+
+        if metrics is None:
+            width = height = 0
+            if self.current_image is not None:
+                height, width = self.current_image.shape[:2]
+            metrics = WorkflowMetrics(
+                file_path=self.current_file_path if self.current_image is not None else None,
+                width=width,
+                height=height,
+                history_count=len(self._history_stack),
+                library_count=library_count,
+            )
+
+        if metrics.file_path:
+            path = Path(metrics.file_path)
+            self.command_asset_label.setText(path.name)
+            self.command_asset_label.setToolTip(str(path))
+        else:
+            self.command_asset_label.setText("未加载素材")
+            self.command_asset_label.setToolTip("")
+
+        if metrics.file_path:
+            parts = [f"{metrics.width} x {metrics.height}px", f"历史 {metrics.history_count} 步"]
+            if metrics.library_count is not None:
+                parts.append(f"图库 {metrics.library_count} 张")
+            self.command_meta_label.setText(" · ".join(parts))
+        else:
+            self.command_meta_label.setText(getattr(self, '_canvas_detail', "打开或拖入素材开始处理。"))
+
+        status = getattr(self, '_canvas_status', "等待素材")
+        self.command_status_badge.setText(status)
+        self.command_status_badge.setProperty("tone", self._tone_for_status(status))
+        self.command_status_badge.style().unpolish(self.command_status_badge)
+        self.command_status_badge.style().polish(self.command_status_badge)
+
+    def _set_canvas_status(self, status: str, detail: Optional[str] = None):
+        """同步主画布 HUD 的轻量业务状态。"""
+        self._canvas_status = status
+        if detail is not None:
+            self._canvas_detail = detail
+
+        current_image = getattr(self, 'current_image', None)
+        image_db = getattr(self, 'image_db', None)
+        library_count = None
+        if image_db is not None:
+            try:
+                library_count = image_db.get_image_count()
+            except Exception:
+                library_count = None
+
+        width = current_image.shape[1] if current_image is not None else 0
+        height = current_image.shape[0] if current_image is not None else 0
+        file_path = getattr(self, 'current_file_path', None) if current_image is not None else None
+        history_count = len(getattr(self, '_history_stack', []))
+
+        if hasattr(self, 'image_viewer'):
+            self.image_viewer.set_canvas_context(
+                file_path=file_path,
+                width=width,
+                height=height,
+                history_count=history_count,
+                library_count=library_count,
+                status=status,
+                detail=self._canvas_detail,
+            )
+        if hasattr(self, 'command_asset_label'):
+            self._refresh_command_center(WorkflowMetrics(
+                file_path=file_path,
+                width=width,
+                height=height,
+                history_count=history_count,
+                library_count=library_count,
+            ), library_count)
+
+    def _tone_for_status(self, status: str) -> str:
+        if status in {"处理中", "加载中", "分析中"}:
+            return "busy"
+        if status in {"失败", "错误"}:
+            return "danger"
+        if status in {"已更新", "已保存", "就绪", "对比中"}:
+            return "active"
+        return "muted"
+
+    def _on_command_compare_toggled(self, checked: bool):
+        """顶部命令中心的对比开关。"""
+        self.toggle_compare(checked)
+
+    def _workflow_activity(self, message: str):
+        """向工作台追加一条轻量活动记录。"""
+        if hasattr(self, 'workflow_panel'):
+            self.workflow_panel.add_activity(message)
+
+    def _focus_color_workflow(self):
+        """切换到调色工作流并聚焦自然语言输入。"""
+        if hasattr(self, 'right_panel'):
+            self.right_panel.setCurrentWidget(self.color_panel)
+        self.color_panel.text_input.setFocus()
+
+    def _focus_agi_workflow(self):
+        """切换到 3D 工作流。"""
+        if hasattr(self, 'right_panel'):
+            self.right_panel.setCurrentWidget(getattr(self, 'agi_scroll', self.agi_panel))
+
+    def _focus_library_workflow(self):
+        """切换到图像库工作流。"""
+        if hasattr(self, 'right_panel'):
+            self.right_panel.setCurrentWidget(self.library_panel)
+
+    def _open_import_workflow(self):
+        """从工作台入口导入素材到图像库。"""
+        self._focus_library_workflow()
+        self.library_panel._on_import_btn_clicked()
+
+    def _focus_workbench(self):
+        """切换到工作台总览。"""
+        if hasattr(self, 'right_panel'):
+            self.right_panel.setCurrentWidget(self.workflow_panel)
+
+    def open_command_palette(self):
+        """打开 Ctrl+K 快速命令面板。"""
+        palette = CommandPalette(self._build_command_definitions(), self)
+        palette.focus_search()
+        palette.exec()
+
+    def open_model_config(self):
+        """打开模型配置窗口。"""
+        dialog = ModelConfigDialog(self)
+        dialog.exec()
+
+    def _build_command_definitions(self):
+        """根据当前上下文生成命令面板条目。"""
+        has_image = self.current_image is not None
+        has_history = bool(self._history_stack)
+        compare_checked = (
+            self.command_compare_btn.isChecked()
+            if hasattr(self, 'command_compare_btn')
+            else False
+        )
+
+        return [
+            CommandDefinition(
+                "open-image",
+                "打开素材",
+                "从文件或图像库选择一张图片",
+                ("open", "image", "素材", "图片"),
+                self.open_image,
+            ),
+            CommandDefinition(
+                "import-library",
+                "导入图库",
+                "切换到图像库并导入素材",
+                ("import", "library", "图库", "素材"),
+                self._open_import_workflow,
+            ),
+            CommandDefinition(
+                "focus-workbench",
+                "查看智能工作台",
+                "回到会话概览、模型状态和下一步动作",
+                ("workflow", "dashboard", "工作台", "状态"),
+                self._focus_workbench,
+            ),
+            CommandDefinition(
+                "focus-color",
+                "进入一句话调色",
+                "打开自然语言调色与风格配方面板",
+                ("color", "grade", "调色", "风格"),
+                self._focus_color_workflow,
+            ),
+            CommandDefinition(
+                "focus-agi",
+                "进入 AGI 相机",
+                "打开 3D、动画和物体选择工作流",
+                ("agi", "3d", "camera", "动画", "相机"),
+                self._focus_agi_workflow,
+            ),
+            CommandDefinition(
+                "focus-library",
+                "查看图像库",
+                "浏览、搜索和管理本地素材",
+                ("library", "search", "图库", "检索"),
+                self._focus_library_workflow,
+            ),
+            CommandDefinition(
+                "save-image",
+                "保存当前结果",
+                "把当前画布结果写回文件",
+                ("save", "export", "保存", "导出"),
+                self.save_image,
+                enabled=has_image,
+            ),
+            CommandDefinition(
+                "toggle-compare",
+                "切换前后对比",
+                "打开或关闭原图与当前结果对比",
+                ("compare", "before", "after", "对比"),
+                lambda: self.toggle_compare(not compare_checked),
+                enabled=has_image,
+            ),
+            CommandDefinition(
+                "undo",
+                "撤销一步",
+                "回到上一次调色状态",
+                ("undo", "history", "撤销", "历史"),
+                self.undo,
+                enabled=has_history,
+            ),
+            CommandDefinition(
+                "reset-image",
+                "重置到原始图像",
+                "清空调色历史并恢复原始素材",
+                ("reset", "original", "重置", "原图"),
+                self.reset_image,
+                enabled=has_image,
+            ),
+            CommandDefinition(
+                "fit-view",
+                "适应窗口",
+                "把当前图像缩放到画布范围内",
+                ("fit", "zoom", "适应", "缩放"),
+                self.image_viewer.fit_to_view,
+                enabled=has_image,
+            ),
+            CommandDefinition(
+                "find-similar",
+                "查找相似风格",
+                "分析当前图片并检索相似素材",
+                ("similar", "style", "相似", "风格检索"),
+                self.find_similar_images,
+                enabled=has_image,
+            ),
+        ]
+
+    def _set_text_analysis_busy(self, busy: bool):
+        """同步文本调色分析的进度条和提交按钮状态。"""
+        self._text_analysis_busy = busy
+
+        if busy:
+            self.progress_bar.show()
+            self.progress_bar.setRange(0, 0)
+        else:
+            self.progress_bar.hide()
+
+        if hasattr(self, 'color_panel'):
+            self.color_panel.apply_btn.setEnabled(not busy)
+            self.color_panel.apply_btn.setText("分析中..." if busy else "应用")
 
     def open_image(self):
         """打开图像文件"""
@@ -500,6 +1069,8 @@ class MainWindow(QMainWindow):
             self.current_image = image.copy()
             self.original_image = image.copy()
             self.current_file_path = file_path
+            self.image_viewer.set_compare_mode(None, None)
+            self._set_compare_checked(False)
 
             # 清空历史记录（新图像）
             self._clear_history()
@@ -512,16 +1083,26 @@ class MainWindow(QMainWindow):
             self.image_info_label.setText(f"{Path(file_path).name} | {w}x{h}")
 
             # 重置调色面板
-            self.color_panel.reset_params()
+            self.color_panel.reset_params(emit_change=False)
 
             # 设置图像到AGI相机（仅当已加载时）
             self.agi_panel.set_image(image)
             if self.agi_camera is not None:
                 self.agi_camera.set_image(image)
 
+            MainWindow._set_canvas_status(
+                self,
+                "就绪",
+                "素材已载入，可以开始调色、检索或生成。",
+            )
+            self._update_action_states()
+            self.statusbar.showMessage(f"已加载图片: {Path(file_path).name}", 3000)
+            self._workflow_activity(f"已加载素材: {Path(file_path).name}")
 
         except (ValueError, OSError, IOError) as e:
             # 捕获文件读取和图像处理相关的错误
+            self.statusbar.showMessage(f"加载图像失败: {Path(file_path).name}", 5000)
+            MainWindow._set_canvas_status(self, "失败", f"加载失败: {Path(file_path).name}")
             QMessageBox.critical(self, "错误", f"加载图像失败: {e}")
 
     def update_image_display(self):
@@ -535,8 +1116,14 @@ class MainWindow(QMainWindow):
             return
 
         if self.current_file_path:
-            imwrite_safe(self.current_file_path, self.current_image)
-            self.statusbar.showMessage("图像已保存", 3000)
+            if imwrite_safe(self.current_file_path, self.current_image):
+                self.statusbar.showMessage("图像已保存", 3000)
+                self._workflow_activity(f"已保存结果: {Path(self.current_file_path).name}")
+                MainWindow._set_canvas_status(self, "已保存", "结果已保存到当前文件。")
+            else:
+                QMessageBox.warning(self, "保存失败", "无法保存图像，请检查路径、格式或权限")
+                self.statusbar.showMessage("图像保存失败", 3000)
+                MainWindow._set_canvas_status(self, "失败", "保存失败，请检查路径、格式或权限。")
         else:
             self.save_image_as()
 
@@ -551,9 +1138,16 @@ class MainWindow(QMainWindow):
         )
 
         if file_path:
-            imwrite_safe(file_path, self.current_image)
-            self.current_file_path = file_path
-            self.statusbar.showMessage("图像已保存", 3000)
+            if imwrite_safe(file_path, self.current_image):
+                self.current_file_path = file_path
+                self.statusbar.showMessage("图像已保存", 3000)
+                self._workflow_activity(f"已另存为: {Path(file_path).name}")
+                MainWindow._set_canvas_status(self, "已保存", "结果已保存为新文件。")
+                self._refresh_workflow_panel()
+            else:
+                QMessageBox.warning(self, "保存失败", "无法保存图像，请检查路径、格式或权限")
+                self.statusbar.showMessage("图像保存失败", 3000)
+                MainWindow._set_canvas_status(self, "失败", "保存失败，请检查路径、格式或权限。")
 
     def undo(self):
         """撤销操作 - 返回上一步状态"""
@@ -562,9 +1156,10 @@ class MainWindow(QMainWindow):
             if self.original_image is not None:
                 self.current_image = self.original_image.copy()
                 self.update_image_display()
-                self.color_panel.reset_params()
+                self.color_panel.reset_params(emit_change=False)
                 self._current_params = None
                 self.statusbar.showMessage("已恢复到原始图像", 2000)
+                self._update_action_states()
             return
 
         # 弹出上一步状态
@@ -579,9 +1174,11 @@ class MainWindow(QMainWindow):
         if self._current_params is not None:
             self.color_panel.set_params(self._current_params)
         else:
-            self.color_panel.reset_params()
+            self.color_panel.reset_params(emit_change=False)
 
         self.statusbar.showMessage(f"已撤销 (剩余 {len(self._history_stack)} 步)", 2000)
+        self._workflow_activity("已撤销一步调色")
+        self._update_action_states()
 
     def _save_history(self):
         """保存当前状态到历史记录"""
@@ -598,27 +1195,38 @@ class MainWindow(QMainWindow):
         # 限制历史记录数量
         if len(self._history_stack) > self.MAX_HISTORY:
             self._history_stack.pop(0)
+        self._update_action_states()
 
     def _clear_history(self):
         """清空历史记录"""
         self._history_stack.clear()
         self._current_params = None
+        self._update_action_states()
 
     def reset_image(self):
         """重置图像"""
         if self.original_image is not None:
             self.current_image = self.original_image.copy()
             self.update_image_display()
-            self.color_panel.reset_params()
+            self.color_panel.reset_params(emit_change=False)
             # 清空历史记录
             self._clear_history()
+            self.statusbar.showMessage("已重置到原始图像", 2000)
+            self._workflow_activity("已重置到原始图像")
+            MainWindow._set_canvas_status(self, "就绪", "已回到原始素材。")
 
     def toggle_compare(self, checked: bool):
         """切换对比视图"""
         if checked and self.original_image is not None:
+            self._set_compare_checked(True)
             self.image_viewer.set_compare_mode(self.original_image, self.current_image)
+            MainWindow._set_canvas_status(self, "对比中", "拖动图像上的分割线查看前后差异。")
         else:
+            if checked:
+                self._set_compare_checked(False)
             self.image_viewer.set_compare_mode(None, None)
+            if self.current_image is not None:
+                MainWindow._set_canvas_status(self, "就绪", "对比视图已关闭。")
 
     # def toggle_library(self, checked: bool): # 移除旧的切换方法
     #     """切换图像库显示"""
@@ -627,49 +1235,61 @@ class MainWindow(QMainWindow):
     #     else:
     #         self.library_dock.hide()
 
-    def _wait_for_thread(self):
+    def _wait_for_thread(self) -> bool:
         """
         等待当前线程完成
 
         安全地等待工作线程结束,不使用危险的terminate()
         如果线程无法正常结束,记录警告但不强制终止
         """
-        if self.thread is not None and self.thread.isRunning():
+        if self.thread is None:
+            return True
+
+        if not self.thread.isRunning():
+            self.thread.deleteLater()
+            self.thread = None
+            return True
+
+        if self.thread.isRunning():
             print("[MainWindow] 等待旧线程完成...")
             self.thread.request_stop()  # 请求停止
 
             # 增加等待时间到10秒,给线程足够时间清理资源
             if not self.thread.wait(10000):  # 最多等待10秒
                 print("[MainWindow] 警告: 线程等待超时")
-                print("[MainWindow] 线程仍在运行,将在后台继续执行")
-                # 不使用terminate(),让线程自然结束
-                # 如果线程持有资源,强制终止会导致资源泄漏或死锁
-
-                # 标记线程为孤立状态,不再管理它
-                self.thread.setParent(None)
-                self.thread = None
-                return
+                self.statusbar.showMessage("已有任务仍在运行，请稍后再试", 5000)
+                return False
 
             self.thread.deleteLater()  # 标记为稍后删除
             self.thread = None
+
+        return True
 
     def apply_color_grading(self, params):
         """应用调色参数"""
         if self.original_image is None:
             return
 
-        # 保存当前状态到历史记录（在应用新调色前）
-        self._save_history()
-
         # 懒加载调色引擎
-        self._ensure_model('color_engine')
+        if not self._ensure_model('color_engine'):
+            QMessageBox.warning(self, "模型不可用", "调色引擎加载失败")
+            return
+
+        if not self._wait_for_thread():
+            return
+
+        # 保存当前状态到历史记录（在应用新调色前）
+        history_len_before = len(self._history_stack)
+        self._save_history()
+        self._grading_history_pending = len(self._history_stack) > history_len_before
 
         # 保存待应用的参数，用于完成后更新
         self._pending_params = params
 
-        self._wait_for_thread()
         self.progress_bar.show()
         self.progress_bar.setRange(0, 0)  # 不确定进度
+        self._workflow_activity("正在应用调色")
+        MainWindow._set_canvas_status(self, "处理中", "正在应用调色参数。")
 
         def process():
             return self.color_engine.apply_grading(self.original_image, params)
@@ -689,83 +1309,246 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_pending_params'):
             self._current_params = self._pending_params
             self._pending_params = None
+        self._grading_history_pending = False
+        workflow_activity = getattr(self, "_workflow_activity", None)
+        if workflow_activity:
+            workflow_activity("调色结果已生成")
+        MainWindow._set_canvas_status(self, "已更新", "调色结果已更新到主画布。")
+        self._update_action_states()
 
     def _on_processing_error(self, error_msg):
         """处理错误回调"""
         self.progress_bar.hide()
+        self._rollback_pending_grading()
+        self.statusbar.showMessage(f"处理失败: {error_msg}", 5000)
+        MainWindow._set_canvas_status(self, "失败", f"处理失败: {error_msg}")
+        self._update_action_states()
         QMessageBox.warning(self, "处理错误", error_msg)
+
+    def _rollback_pending_grading(self):
+        """调色线程失败时移除本次尚未成功应用的历史记录。"""
+        if getattr(self, '_grading_history_pending', False):
+            if self._history_stack:
+                self._history_stack.pop()
+            self._grading_history_pending = False
+
+        if hasattr(self, '_pending_params'):
+            self._pending_params = None
+
+    def _refresh_look_presets(self, selected_id: Optional[str] = None):
+        """刷新调色面板中的风格配方列表。"""
+        if not hasattr(self, "color_panel") or not hasattr(self, "look_store"):
+            return
+        self.color_panel.set_look_presets([
+            preset.to_dict() for preset in self.look_store.list_presets()
+        ], selected_id=selected_id)
+
+    def apply_look_preset(self, preset_id: str):
+        """套用一个已保存的风格配方。"""
+        if self.original_image is None:
+            QMessageBox.warning(self, "提示", "请先加载图像")
+            return
+
+        preset = self.look_store.get_preset(preset_id)
+        if preset is None:
+            self.color_panel.set_look_status("风格配方不存在", False)
+            return
+
+        from ..ai import ColorGradingParams
+
+        params = ColorGradingParams.from_dict(preset.params)
+        self.color_panel.set_params(params)
+        self.color_panel.set_look_status(f"已套用风格配方: {preset.name}", True)
+        self._workflow_activity(f"套用风格配方: {preset.name}")
+        self.apply_color_grading(params)
+
+    def save_current_look_preset(self):
+        """保存当前调色参数为自定义风格配方。"""
+        if self.original_image is None:
+            QMessageBox.warning(self, "提示", "请先加载图像")
+            return
+
+        default_name = Path(self.current_file_path).stem if self.current_file_path else "自定义风格"
+        name, ok = QInputDialog.getText(
+            self,
+            "保存风格配方",
+            "请输入风格配方名称:",
+            text=f"{default_name} 风格",
+        )
+        if not ok:
+            return
+
+        try:
+            preset = self.look_store.save_preset(name, self.color_panel.get_params())
+        except ValueError as e:
+            QMessageBox.warning(self, "保存失败", str(e))
+            self.color_panel.set_look_status(str(e), False)
+            return
+
+        self._refresh_look_presets(selected_id=preset.id)
+        self.color_panel.set_look_status(f"已保存风格配方: {preset.name}", True)
+        self._workflow_activity(f"保存风格配方: {preset.name}")
+
+    def delete_look_preset(self, preset_id: str):
+        """删除一个自定义风格配方。"""
+        preset = self.look_store.get_preset(preset_id)
+        if preset is None:
+            self.color_panel.set_look_status("风格配方不存在", False)
+            return
+        if preset.source != "custom":
+            self.color_panel.set_look_status("内置风格配方不可删除", False)
+            return
+
+        result = QMessageBox.question(
+            self,
+            "删除风格配方",
+            f"确定要删除风格配方 '{preset.name}' 吗？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if result != QMessageBox.Yes:
+            return
+
+        if self.look_store.delete_preset(preset_id):
+            self._refresh_look_presets()
+            self.color_panel.set_look_status(f"已删除风格配方: {preset.name}", True)
+            self._workflow_activity(f"删除风格配方: {preset.name}")
+
+    def _coerce_batch_result(self, result) -> BatchOperationResult:
+        """Accept old integer callbacks and new structured batch results."""
+        if isinstance(result, BatchOperationResult):
+            return result
+        count = int(result or 0)
+        return BatchOperationResult(total=count, success=count)
+
+    def _show_batch_completion(
+            self,
+            action: str,
+            result: BatchOperationResult,
+            *,
+            show_success_dialog: bool = False):
+        """Show a concise batch summary in the status bar and, when needed, a dialog."""
+        timeout = 5000 if result.has_issues else 3000
+        self.statusbar.showMessage(result.status_message(action), timeout)
+        workflow_activity = getattr(self, "_workflow_activity", None)
+        if workflow_activity:
+            workflow_activity(result.status_message(action))
+        refresh_workflow = getattr(self, "_refresh_workflow_panel", None)
+        if refresh_workflow:
+            refresh_workflow()
+
+        if result.has_issues:
+            QMessageBox.warning(self, f"{action}未完全完成", result.detail_message(action))
+        elif show_success_dialog:
+            QMessageBox.information(self, f"{action}完成", result.detail_message(action))
+
+    def _collect_supported_image_files(self, folder_path: str) -> list[Path]:
+        """Return unique, top-level supported image files in a folder."""
+        folder = Path(folder_path)
+        if not folder.exists() or not folder.is_dir():
+            raise ValueError(f"文件夹不存在: {folder}")
+
+        supported_suffixes = {fmt.lower() for fmt in SUPPORTED_FORMATS}
+        unique = {}
+        for path in folder.iterdir():
+            if not path.is_file() or path.suffix.lower() not in supported_suffixes:
+                continue
+            key = str(path.resolve()).casefold()
+            unique[key] = path
+
+        return sorted(unique.values(), key=lambda item: item.name.casefold())
+
+    def _run_import_batch(self, file_paths: list, group: str, worker=None) -> BatchOperationResult:
+        """Import images and collect per-file failures for user-facing feedback."""
+        result = BatchOperationResult(total=len(file_paths))
+        for i, path in enumerate(file_paths):
+            if worker and worker.stop_requested:
+                result.canceled = True
+                logger.debug("Import batch canceled before %s", path)
+                break
+            try:
+                self.image_db.add_image(path, group=group)
+                result.success += 1
+            except (OSError, ValueError, RuntimeError) as e:
+                result.add_failure(path, e)
+                logger.debug("Failed to import %s: %s", path, e)
+
+            if worker:
+                worker.progress.emit(i + 1)
+
+        return result
+
+    def _run_index_batch(self, image_files: list[Path], worker=None) -> BatchOperationResult:
+        """Index images and collect per-file failures for user-facing feedback."""
+        result = BatchOperationResult(total=len(image_files))
+        for i, img_path in enumerate(image_files):
+            if worker and worker.stop_requested:
+                result.canceled = True
+                logger.debug("Index batch canceled before %s", img_path)
+                break
+            try:
+                self.image_db.add_image(str(img_path))
+                result.success += 1
+            except (OSError, ValueError, RuntimeError) as e:
+                result.add_failure(img_path, e)
+                logger.debug("Failed to index %s: %s", img_path, e)
+
+            if worker:
+                worker.progress.emit(i + 1)
+
+        return result
 
     def process_text_command(self, text: str):
         """处理文本命令（异步）"""
+        if getattr(self, "_text_analysis_busy", False):
+            self.statusbar.showMessage("调色指令正在分析中，请稍候...", 2000)
+            return
+
         if self.original_image is None:
             QMessageBox.warning(self, "提示", "请先加载图像")
             return
 
         # 懒加载NLP解析器和调色引擎
-        self._ensure_model('nlp_parser')
-        self._ensure_model('color_engine')
+        if not self._ensure_model('nlp_parser'):
+            QMessageBox.warning(self, "模型不可用", "语义解析器加载失败")
+            return
+        if not self._ensure_model('color_engine'):
+            QMessageBox.warning(self, "模型不可用", "调色引擎加载失败")
+            return
 
         # 状态反馈
         self.statusbar.showMessage(f"正在分析调色指令: {text[:30]}...")
-        print(f"[调色指令] 处理: {text}")
-
-        # 显示进度指示器
-        self.progress_bar.show()
-        self.progress_bar.setRange(0, 0)  # 不确定进度
-
-        # 禁用应用按钮，防止重复提交
-        if hasattr(self, 'color_panel'):
-            self.color_panel.apply_btn.setEnabled(False)
-            self.color_panel.apply_btn.setText("分析中...")
+        workflow_activity = getattr(self, "_workflow_activity", None)
+        if workflow_activity:
+            workflow_activity(f"分析调色指令: {text[:24]}")
+        logger.debug("[调色指令] 处理: %s", text)
+        self._set_text_analysis_busy(True)
 
         # 检查是否需要查找参考图像
-        reference_params = None
-        if "复刻" in text or "参考" in text:
-            # 尝试从文本中提取搜索关键词
-            if self.image_db:
-                results = self.image_db.search_by_text(text, top_k=1)
-                if results:
-                    ref_path = results[0]["path"]
-                    ref_image = imread_safe(ref_path)
-                    if ref_image is not None:
-                        reference_params = self.color_engine.extract_color_params(ref_image)
-                        print(f"[调色指令] 使用参考图片: {ref_path}")
+        try:
+            reference_params = self._resolve_text_reference_params(text)
+        except Exception as e:
+            logger.debug("Failed to resolve reference image for text command: %s", e, exc_info=True)
+            self._set_text_analysis_busy(False)
+            self.statusbar.showMessage(f"参考图片分析失败: {e}", 5000)
+            QMessageBox.warning(self, "参考图片不可用", f"无法使用参考图片:\n{e}")
+            return
 
         # 定义成功回调
         def on_parse_success(params):
             """解析成功回调"""
-            # 打印解析结果
-            print(f"[调色指令] 解析结果: 曝光={params.exposure:.2f}, 对比度={params.contrast:.2f}, "
-                  f"色温={params.temperature:.0f}, 饱和度={params.saturation:.2f}")
-
-            # 隐藏进度条
-            self.progress_bar.hide()
-
-            # 恢复按钮状态
-            if hasattr(self, 'color_panel'):
-                self.color_panel.apply_btn.setEnabled(True)
-                self.color_panel.apply_btn.setText("应用")
-
-            # 更新面板显示
-            self.color_panel.set_params(params)
-
-            # 应用调色
-            self.apply_color_grading(params)
-
-            self.statusbar.showMessage("调色指令已应用", 3000)
+            logger.debug(
+                "[调色指令] 解析结果: 曝光=%.2f, 对比度=%.2f, 色温=%.0f, 饱和度=%.2f",
+                params.exposure,
+                params.contrast,
+                params.temperature,
+                params.saturation,
+            )
+            self._text_params_ready.emit(params)
 
         # 定义错误回调
         def on_parse_error(error_msg: str):
             """解析失败回调"""
-            self.progress_bar.hide()
-
-            # 恢复按钮状态
-            if hasattr(self, 'color_panel'):
-                self.color_panel.apply_btn.setEnabled(True)
-                self.color_panel.apply_btn.setText("应用")
-
-            self.statusbar.showMessage(f"分析失败: {error_msg}", 5000)
-            QMessageBox.warning(self, "分析失败", f"无法分析调色指令:\n{error_msg}")
+            self._text_parse_failed.emit(error_msg)
 
         # 异步解析
         self.nlp_parser.parse_async(
@@ -775,40 +1558,78 @@ class MainWindow(QMainWindow):
             reference_params=reference_params
         )
 
+    def _apply_text_color_params(self, params):
+        """接收文本调色参数并立即应用到当前图片。"""
+        self._set_text_analysis_busy(False)
+
+        # 回填面板只是为了让用户看到 LLM 给出的参数；图片应用由下一行主动触发。
+        self.color_panel.set_params(params)
+        self.apply_color_grading(params)
+
+        self.statusbar.showMessage("调色指令已应用", 3000)
+
+    def _handle_text_parse_error(self, error_msg: str):
+        """处理文本调色解析失败。"""
+        self._set_text_analysis_busy(False)
+        self.statusbar.showMessage(f"分析失败: {error_msg}", 5000)
+        QMessageBox.warning(self, "分析失败", f"无法分析调色指令:\n{error_msg}")
+
+    def _resolve_text_reference_params(self, text: str):
+        """按文本意图查找参考图并提取色调参数。"""
+        if "复刻" not in text and "参考" not in text:
+            return None
+        if not self.image_db:
+            return None
+
+        results = self.image_db.search_by_text(text, top_k=1)
+        if not results:
+            return None
+
+        ref_path = results[0].get("path")
+        if not ref_path:
+            raise ValueError("参考图片缺少文件路径")
+
+        ref_image = imread_safe(ref_path)
+        if ref_image is None:
+            raise ValueError(f"无法读取参考图片: {ref_path}")
+
+        logger.debug("[调色指令] 使用参考图片: %s", ref_path)
+        return self.color_engine.extract_color_params(ref_image)
+
     def import_images(self, file_paths: list, group: str = "默认"):
         """导入图像到库"""
         if not file_paths:
+            self.statusbar.showMessage("没有可导入的图片", 3000)
             return
 
-        self._ensure_model('image_db')
-        self._wait_for_thread()
+        if not self._ensure_model('image_db'):
+            QMessageBox.warning(self, "模型不可用", "图像数据库加载失败")
+            return
+        if not self._wait_for_thread():
+            return
         
         self.progress_bar.show()
         self.progress_bar.setRange(0, len(file_paths))
         self.statusbar.showMessage(f"准备导入 {len(file_paths)} 张图片到分组 '{group}'...")
+        self._workflow_activity(f"导入 {len(file_paths)} 张图片到 {group}")
+
+        worker = None
 
         def process_import():
-            success_count = 0
-            for i, path in enumerate(file_paths):
-                try:
-                    self.image_db.add_image(path, group=group)
-                    success_count += 1
-                except (OSError, ValueError, RuntimeError) as e:
-                    # 捕获文件和数据库相关错误
-                    print(f"导入失败 {path}: {e}")
-                
-                if self.thread:
-                    self.thread.progress.emit(i + 1)
-            return success_count
+            return self._run_import_batch(file_paths, group, worker)
 
-        self.thread = ProcessingThread(process_import)
-        self.thread.progress.connect(self.progress_bar.setValue)
-        self.thread.finished.connect(lambda n: self._on_import_finished(n))
-        self.thread.start()
+        worker = ProcessingThread(process_import)
+        self.thread = worker
+        worker.progress.connect(self.progress_bar.setValue)
+        worker.finished.connect(self._on_import_finished)
+        worker.error.connect(self._on_processing_error)
+        worker.start()
 
     def open_library_manager(self):
         """打开图像库管理器"""
-        self._ensure_model('image_db')
+        if not self._ensure_model('image_db'):
+            QMessageBox.warning(self, "模型不可用", "图像数据库加载失败")
+            return
         dialog = LibraryManagerDialog(self.image_db, self)
         # 连接导入信号
         dialog.import_requested.connect(self.import_images)
@@ -816,14 +1637,13 @@ class MainWindow(QMainWindow):
         # 关闭后刷新面板
         self.library_panel.refresh()
 
-    def _on_import_finished(self, count: int):
+    def _on_import_finished(self, result):
         """导入完成回调"""
+        batch_result = self._coerce_batch_result(result)
         self.progress_bar.hide()
         self.library_panel.refresh()
-        self.statusbar.showMessage(f"成功导入 {count} 张图片", 3000)
-        # 如果管理器打开着，它也许需要刷新，但这是一个模态对话框，通常关闭后刷新即可
-        # 或者可以发送信号通知
-        QMessageBox.information(self, "导入完成", f"已成功导入 {count} 张图片到图像库")
+        self._show_batch_completion("导入", batch_result, show_success_dialog=True)
+        self._refresh_workflow_panel()
 
     def find_similar_images(self):
         """查找相似风格图像（混合搜索）"""
@@ -832,7 +1652,9 @@ class MainWindow(QMainWindow):
             return
             
         # 1. 风格分析
-        self._ensure_model('style_analyzer')
+        if not self._ensure_model('style_analyzer'):
+            QMessageBox.warning(self, "模型不可用", "风格分析模型加载失败")
+            return
         self.statusbar.showMessage("正在分析图像风格...")
         
         try:
@@ -844,7 +1666,9 @@ class MainWindow(QMainWindow):
             self.statusbar.showMessage(f"风格分析: {summary.style_tags[:2]}", 3000)
             
             # 2. 本地搜索
-            self._ensure_model('image_db') 
+            if not self._ensure_model('image_db'):
+                QMessageBox.warning(self, "模型不可用", "图像数据库加载失败")
+                return
             local_results = self.image_db.search_similar(self.current_image, top_k=10)
             
             # 3. 网络搜索
@@ -860,6 +1684,7 @@ class MainWindow(QMainWindow):
                 
             # 合并结果展示
             self.library_panel.show_search_results(local_results)
+            self._workflow_activity(f"找到 {len(local_results)} 张相似风格图片")
             # 切换到图像库Tab (假设是index 2)
             # 查找 TabWidget
             tab_widget = self.library_panel.parent().parent() # QTabWidget -> QStackWidget -> Panel
@@ -933,6 +1758,8 @@ class MainWindow(QMainWindow):
             self.current_image = ref_image.copy()
             self.original_image = ref_image.copy()
             self.current_file_path = image_path
+            self.image_viewer.set_compare_mode(None, None)
+            self._set_compare_checked(False)
             self.update_image_display()
 
             # 更新状态栏
@@ -945,11 +1772,17 @@ class MainWindow(QMainWindow):
                 self.agi_camera.set_image(ref_image)
 
             # 重置调色面板
-            self.color_panel.reset_params()
+            self.color_panel.reset_params(emit_change=False)
+            self._clear_history()
+            self._update_action_states()
 
             self.statusbar.showMessage(f"已加载图片: {Path(image_path).name}", 3000)
+            self._workflow_activity(f"从图像库载入: {Path(image_path).name}")
+            MainWindow._set_canvas_status(self, "就绪", "图像库素材已载入。")
         else:
             self.statusbar.showMessage(f"无法加载图片: {image_path}", 3000)
+            MainWindow._set_canvas_status(self, "失败", f"图库素材加载失败: {Path(image_path).name}")
+            QMessageBox.warning(self, "加载失败", f"无法加载图片:\n{image_path}")
     
     def upload_and_apply_reference(self):
         """上传参考图片并提取色调应用到当前图片"""
@@ -970,6 +1803,11 @@ class MainWindow(QMainWindow):
         if ref_image is None:
             QMessageBox.warning(self, "错误", "无法读取选择的图片")
             self.color_panel.set_reference_status("读取参考图片失败", False)
+            return
+
+        if not self._ensure_model('color_engine'):
+            QMessageBox.warning(self, "模型不可用", "调色引擎加载失败")
+            self.color_panel.set_reference_status("调色引擎加载失败", False)
             return
         
         # 更新状态
@@ -992,6 +1830,7 @@ class MainWindow(QMainWindow):
                 f"已应用参考图片色调: {PathLib(file_path).name}", True
             )
             self.statusbar.showMessage("参考图片色调已应用", 3000)
+            self._workflow_activity(f"已应用参考色调: {PathLib(file_path).name}")
             
         except (ValueError, RuntimeError, OSError) as e:
             # 捕获图像处理和模型相关错误
@@ -1000,39 +1839,46 @@ class MainWindow(QMainWindow):
 
     def index_folder(self, folder_path: str):
         """索引文件夹中的图像"""
-        folder = Path(folder_path)
-        image_files = []
-        for fmt in SUPPORTED_FORMATS:
-            image_files.extend(folder.glob(f"*{fmt}"))
-            image_files.extend(folder.glob(f"*{fmt.upper()}"))
+        try:
+            image_files = self._collect_supported_image_files(folder_path)
+        except ValueError as e:
+            QMessageBox.warning(self, "文件夹不可用", str(e))
+            return
 
         if not image_files:
             QMessageBox.information(self, "提示", "文件夹中没有支持的图像文件")
             return
 
-        self._wait_for_thread()
+        if not self._ensure_model('image_db'):
+            QMessageBox.warning(self, "模型不可用", "图像数据库加载失败")
+            return
+        if not self._wait_for_thread():
+            return
+
         self.progress_bar.show()
         self.progress_bar.setRange(0, len(image_files))
+        self.statusbar.showMessage(f"准备索引 {len(image_files)} 张图片...")
+        self._workflow_activity(f"开始索引文件夹: {Path(folder_path).name}")
+
+        worker = None
 
         def index_images():
-            for i, img_path in enumerate(image_files):
-                try:
-                    self.image_db.add_image(str(img_path))
-                except Exception:
-                    pass
-                self.thread.progress.emit(i + 1)
-            return len(image_files)
+            return self._run_index_batch(image_files, worker)
 
-        self.thread = ProcessingThread(index_images)
-        self.thread.progress.connect(self.progress_bar.setValue)
-        self.thread.finished.connect(lambda n: self._on_index_finished(n))
-        self.thread.start()
+        worker = ProcessingThread(index_images)
+        self.thread = worker
+        worker.progress.connect(self.progress_bar.setValue)
+        worker.finished.connect(self._on_index_finished)
+        worker.error.connect(self._on_processing_error)
+        worker.start()
 
-    def _on_index_finished(self, count: int):
+    def _on_index_finished(self, result):
         """索引完成回调"""
+        batch_result = self._coerce_batch_result(result)
         self.progress_bar.hide()
         self.library_panel.refresh()
-        self.statusbar.showMessage(f"已索引 {count} 张图像", 3000)
+        self._show_batch_completion("索引", batch_result)
+        self._refresh_workflow_panel()
 
     def generate_3d(self, params: dict):
         """生成3D模型"""
@@ -1041,13 +1887,18 @@ class MainWindow(QMainWindow):
             return
 
         # 懒加载AGI相机
-        self._ensure_model('agi_camera')
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
         # 设置当前图像
         self.agi_camera.set_image(self.current_image)
 
-        self._wait_for_thread()
+        if not self._wait_for_thread():
+            return
         self.progress_bar.show()
         self.progress_bar.setRange(0, 0)
+        self._workflow_activity("正在生成整图 3D 模型")
+        MainWindow._set_canvas_status(self, "处理中", "正在从当前素材生成 3D 模型。")
 
         def generate():
             return self.agi_camera.capture_to_3d(
@@ -1066,6 +1917,9 @@ class MainWindow(QMainWindow):
         self.progress_bar.hide()
         self.agi_panel.set_mesh(mesh)
         self.statusbar.showMessage("3D模型生成完成", 3000)
+        self._workflow_activity("3D 模型已生成")
+        MainWindow._set_canvas_status(self, "已更新", "3D 模型已生成，可继续生成动画或导出。")
+        self._refresh_workflow_panel()
 
     def generate_animation(self, params: dict):
         """生成动画"""
@@ -1074,12 +1928,17 @@ class MainWindow(QMainWindow):
             return
 
         # 懒加载AGI相机
-        self._ensure_model('agi_camera')
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
         self.agi_camera.set_image(self.current_image)
 
-        self._wait_for_thread()
+        if not self._wait_for_thread():
+            return
         self.progress_bar.show()
         self.progress_bar.setRange(0, 0)
+        self._workflow_activity("正在生成旋转动画")
+        MainWindow._set_canvas_status(self, "处理中", "正在生成旋转动画。")
 
         def generate():
             return self.agi_camera.generate_demo_animation(
@@ -1099,6 +1958,9 @@ class MainWindow(QMainWindow):
         self.progress_bar.hide()
         self.agi_panel.set_animation(frames)
         self.statusbar.showMessage("动画生成完成", 3000)
+        self._workflow_activity("旋转动画已生成")
+        MainWindow._set_canvas_status(self, "已更新", "动画已生成，可在 AGI 相机面板预览。")
+        self._refresh_workflow_panel()
 
     def export_3d_model(self):
         """导出3D模型"""
@@ -1113,9 +1975,13 @@ class MainWindow(QMainWindow):
         )
 
         if file_path:
+            if not self._ensure_model('agi_camera'):
+                QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+                return
             ext = Path(file_path).suffix.lower()[1:]
             self.agi_camera.export_3d_model(mesh, file_path, ext)
             self.statusbar.showMessage(f"3D模型已导出: {file_path}", 3000)
+            self._workflow_activity(f"已导出 3D 模型: {Path(file_path).name}")
 
     def _on_object_selected(self, x: int, y: int):
         """处理物体点选（异步执行避免UI卡顿）"""
@@ -1125,7 +1991,9 @@ class MainWindow(QMainWindow):
             return
 
         # 懒加载AGI相机
-        self._ensure_model('agi_camera')
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
         self.agi_camera.set_image(self.current_image)
 
         self.statusbar.showMessage(f"正在分割物体... 点击位置: ({x}, {y})")
@@ -1135,7 +2003,8 @@ class MainWindow(QMainWindow):
         def do_segment():
             return self.agi_camera.select_object_at_point(x, y)
 
-        self._wait_for_thread()
+        if not self._wait_for_thread():
+            return
         self.thread = ProcessingThread(do_segment)
         self.thread.finished.connect(self._on_segment_finished)
         self.thread.error.connect(lambda e: self._on_segment_error(e))
@@ -1149,7 +2018,9 @@ class MainWindow(QMainWindow):
             return
 
         # 懒加载AGI相机
-        self._ensure_model('agi_camera')
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
         self.agi_camera.set_image(self.current_image)
 
         self.statusbar.showMessage(f"正在分割物体... 框选区域: ({x1}, {y1}) - ({x2}, {y2})")
@@ -1159,7 +2030,8 @@ class MainWindow(QMainWindow):
         def do_segment():
             return self.agi_camera.select_object_with_box(x1, y1, x2, y2)
 
-        self._wait_for_thread()
+        if not self._wait_for_thread():
+            return
         self.thread = ProcessingThread(do_segment)
         self.thread.finished.connect(self._on_segment_finished)
         self.thread.error.connect(lambda e: self._on_segment_error(e))
@@ -1173,7 +2045,9 @@ class MainWindow(QMainWindow):
             return
 
         # 懒加载AGI相机
-        self._ensure_model('agi_camera')
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
         self.agi_camera.set_image(self.current_image)
 
         self.statusbar.showMessage(f"正在分割物体... 划线路径: {len(path_points)} 个点")
@@ -1183,7 +2057,8 @@ class MainWindow(QMainWindow):
         def do_segment():
             return self.agi_camera.select_object_with_path(path_points)
 
-        self._wait_for_thread()
+        if not self._wait_for_thread():
+            return
         self.thread = ProcessingThread(do_segment)
         self.thread.finished.connect(self._on_segment_finished)
         self.thread.error.connect(lambda e: self._on_segment_error(e))
@@ -1200,6 +2075,8 @@ class MainWindow(QMainWindow):
                 self.agi_panel.update_selection_preview(overlay)
             self.agi_panel.set_selection_result(True, "物体已选中")
             self.statusbar.showMessage("物体分割完成", 3000)
+            self._workflow_activity("物体选择已就绪")
+            self._refresh_workflow_panel()
         else:
             self.agi_panel.set_selection_result(False, "分割失败，请重试")
             self.statusbar.showMessage("物体分割失败", 3000)
@@ -1209,18 +2086,26 @@ class MainWindow(QMainWindow):
         print(f"[MainWindow] 分割错误: {error_msg}")
         self.agi_panel.set_selection_result(False, f"分割失败: {error_msg}")
         self.statusbar.showMessage("物体分割失败", 3000)
+        self._refresh_workflow_panel()
 
     def _on_generate_object_3d(self, params: dict):
         """从选中物体生成3D"""
         # 懒加载AGI相机（如果还未加载）
-        self._ensure_model('agi_camera')
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
         
         if not self.agi_camera.has_selection():
             QMessageBox.warning(self, "提示", "请先选择物体")
             return
 
+        if not self._wait_for_thread():
+            return
+
         self.progress_bar.show()
         self.statusbar.showMessage("正在生成选中物体的3D动画...")
+        self._workflow_activity("正在生成选中物体 3D 动画")
+        MainWindow._set_canvas_status(self, "处理中", "正在为选中物体生成 3D 动画。")
 
         def generate():
             return self.agi_camera.generate_object_3d_animation(
@@ -1241,10 +2126,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请至少选择2张不同角度的图片")
             return
 
-        self._wait_for_thread()
+        if not self._ensure_model('agi_camera'):
+            QMessageBox.warning(self, "模型不可用", "3D处理模块加载失败")
+            return
+
+        if not self._wait_for_thread():
+            return
         self.progress_bar.show()
         self.progress_bar.setRange(0, 0)
         self.statusbar.showMessage(f"正在从{len(image_paths)}张图片进行多视角3D重建...")
+        self._workflow_activity(f"正在多视角重建: {len(image_paths)} 张")
 
         def generate():
             mesh, frames = self.agi_camera.generate_multiview_3d(
@@ -1269,6 +2160,8 @@ class MainWindow(QMainWindow):
         if frames:
             self.agi_panel.set_animation(frames)
         self.statusbar.showMessage("多视角3D重建完成", 3000)
+        self._workflow_activity("多视角 3D 重建完成")
+        self._refresh_workflow_panel()
 
     def show_about(self):
         """显示关于对话框"""
@@ -1301,9 +2194,9 @@ class MainWindow(QMainWindow):
             self.thread.request_stop()
             if not self.thread.wait(5000):  # 等待最多5秒
                 print("[MainWindow] 警告: 处理线程等待超时")
-                print("[MainWindow] 将在后台等待线程完成")
-                # 不使用terminate(),让线程自然结束
-                # 应用程序关闭时线程会自动结束
+                self.statusbar.showMessage("后台任务仍在运行，暂不能关闭", 5000)
+                event.ignore()
+                return
             else:
                 print("[MainWindow] 处理线程已停止")
 
@@ -1326,11 +2219,8 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("AI全模态影像处理")
 
-    # 设置应用程序默认字体，避免QFont警告
-    default_font = QFont()
-    default_font.setFamily("Microsoft YaHei")  # 使用微软雅黑
-    default_font.setPointSize(10)  # 设置有效的字体大小
-    app.setFont(default_font)
+    # 设置应用程序默认字体，优先使用系统可用的中文友好 UI 字体。
+    apply_application_font(app)
 
     window = MainWindow()
     window.showMaximized()
