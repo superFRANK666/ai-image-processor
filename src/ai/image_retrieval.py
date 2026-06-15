@@ -53,6 +53,43 @@ MULTILINGUAL_CLIP_MODELS = {
 }
 
 
+COLOR_SEARCH_ALIASES = {
+    "red": ("红", "红色", "红底", "红背景", "red"),
+    "blue": ("蓝", "蓝色", "蓝底", "蓝背景", "blue"),
+    "green": ("绿", "绿色", "绿底", "绿背景", "green"),
+    "yellow": ("黄", "黄色", "黄底", "黄背景", "yellow"),
+    "white": ("白", "白色", "白底", "白背景", "white"),
+    "black": ("黑", "黑色", "黑底", "黑背景", "black"),
+    "orange": ("橙", "橙色", "橙底", "橙背景", "orange"),
+    "purple": ("紫", "紫色", "紫底", "紫背景", "purple"),
+    "pink": ("粉", "粉色", "粉底", "粉背景", "pink"),
+    "gray": ("灰", "灰色", "灰底", "灰背景", "gray", "grey"),
+    "brown": ("棕", "棕色", "棕底", "棕背景", "brown"),
+    "aqua": ("青", "青色", "青底", "青背景", "cyan", "aqua"),
+}
+
+
+COLOR_PRIMARY_CN = {
+    "red": "红",
+    "blue": "蓝",
+    "green": "绿",
+    "yellow": "黄",
+    "white": "白",
+    "black": "黑",
+    "orange": "橙",
+    "purple": "紫",
+    "pink": "粉",
+    "gray": "灰",
+    "brown": "棕",
+    "aqua": "青",
+}
+
+
+BACKGROUND_QUERY_WORDS = (
+    "底", "底色", "背景", "背景色", "证件照", "id photo", "background"
+)
+
+
 @dataclass
 class ImageFeature:
     """图像特征数据"""
@@ -1038,6 +1075,7 @@ class ImageIndexDatabase:
         """
         results = []
         seen_ids = set()
+        search_intent = self._analyze_search_intent(text_query)
 
         # 1. 首先进行名称/路径匹配搜索
         name_results = self.search_by_name(text_query, top_k)
@@ -1106,8 +1144,15 @@ class ImageIndexDatabase:
 
                     # 3. 多特征综合评分
                     if use_multi_feature and candidates:
+                        candidates = self._merge_metadata_feature_candidates(
+                            candidates,
+                            text_query,
+                            search_intent,
+                            seen_ids,
+                            limit=n_candidates,
+                        )
                         candidates = self._multi_feature_rerank(
-                            candidates, text_query, text_embedding
+                            candidates, text_query, text_embedding, search_intent
                         )
 
                     # 过滤和添加结果
@@ -1128,7 +1173,7 @@ class ImageIndexDatabase:
                             "similarity": final_score,
                             "semantic_similarity": candidate['semantic_similarity'],
                             "metadata": candidate['metadata'],
-                            "match_type": 'semantic'
+                            "match_type": candidate.get('match_type', 'semantic')
                         })
 
                         if len(results) >= top_k:
@@ -1157,13 +1202,127 @@ class ImageIndexDatabase:
             else:
                 print(f"[搜索] CLIP模型未加载，仅使用名称搜索")
 
+        if (use_multi_feature and search_intent.get('color_keywords')
+                and len(results) < top_k):
+            fallback_candidates = self._metadata_feature_candidates(
+                text_query,
+                search_intent,
+                exclude_ids=seen_ids,
+                limit=top_k * 5,
+            )
+            if fallback_candidates:
+                fallback_candidates = self._multi_feature_rerank(
+                    fallback_candidates,
+                    text_query,
+                    np.array([], dtype=np.float32),
+                    search_intent,
+                )
+                for candidate in fallback_candidates:
+                    final_score = candidate.get('final_score', 0)
+                    if final_score < SIMILARITY_THRESHOLD:
+                        continue
+
+                    seen_ids.add(candidate['id'])
+                    results.append({
+                        "id": candidate['id'],
+                        "path": candidate['path'],
+                        "similarity": final_score,
+                        "semantic_similarity": candidate.get('semantic_similarity', 0),
+                        "metadata": candidate['metadata'],
+                        "match_type": 'metadata_color'
+                    })
+
+                    if len(results) >= top_k:
+                        break
+
         # 按相似度排序后返回
         results.sort(key=lambda x: x.get('similarity', 0), reverse=True)
         print(f"[搜索] 找到 {len(results)} 个结果")
         return results[:top_k]
 
+    def _metadata_feature_candidates(self, text_query: str, search_intent: Dict[str, Any],
+                                     exclude_ids: Optional[set] = None,
+                                     limit: int = 100) -> List[Dict]:
+        """从索引元数据中召回颜色/名称强匹配候选，弥补 CLIP 候选漏召。"""
+        if not search_intent.get('color_keywords'):
+            return []
+
+        exclude_ids = exclude_ids or set()
+        records = []
+
+        if self.collection is not None:
+            try:
+                all_images = self.collection.get(include=['metadatas'])
+            except Exception as e:
+                logger.debug("颜色元数据召回失败: %s", e, exc_info=True)
+                all_images = None
+
+            if all_images and all_images.get('ids'):
+                for i, image_id in enumerate(all_images['ids']):
+                    metadata = all_images['metadatas'][i] if all_images.get('metadatas') else {}
+                    records.append((image_id, metadata))
+        else:
+            for item in getattr(self, "memory_index", []):
+                records.append((item.get("id", ""), item.get("metadata", {})))
+
+        candidates = []
+        for image_id, metadata in records:
+            if image_id in exclude_ids:
+                continue
+            if not self._is_searchable_image_metadata(image_id, metadata):
+                continue
+
+            color_score = self._compute_color_match_score(
+                metadata,
+                search_intent['color_keywords'],
+                background_intent=search_intent.get('background_intent', False),
+            )
+            name_score = self._compute_name_match_score(metadata, text_query, search_intent)
+
+            if color_score < 0.18 and name_score <= 0:
+                continue
+
+            candidates.append({
+                "id": image_id,
+                "path": metadata.get("path", ""),
+                "semantic_similarity": 0.0,
+                "metadata": metadata,
+                "match_type": "metadata_color",
+                "_metadata_prefilter_score": color_score + name_score * 0.35,
+            })
+
+        candidates.sort(key=lambda item: item.get("_metadata_prefilter_score", 0), reverse=True)
+        return candidates[:limit]
+
+    def _merge_metadata_feature_candidates(self, candidates: List[Dict], text_query: str,
+                                           search_intent: Dict[str, Any],
+                                           exclude_ids: Optional[set] = None,
+                                           limit: int = 100) -> List[Dict]:
+        """把语义候选和颜色元数据候选合并，保留同一图片的语义分。"""
+        if not search_intent.get('color_keywords'):
+            return candidates
+
+        merged = list(candidates)
+        existing_ids = {candidate.get("id") for candidate in merged}
+        metadata_candidates = self._metadata_feature_candidates(
+            text_query,
+            search_intent,
+            exclude_ids=exclude_ids,
+            limit=limit,
+        )
+
+        for candidate in metadata_candidates:
+            image_id = candidate.get("id")
+            if image_id in existing_ids:
+                continue
+            merged.append(candidate)
+            existing_ids.add(image_id)
+
+        return merged
+
     def _multi_feature_rerank(self, candidates: List[Dict], text_query: str,
-                             text_embedding: np.ndarray) -> List[Dict]:
+                             text_embedding: np.ndarray,
+                             search_intent: Optional[Dict[str, Any]] = None) -> List[Dict]:
         """
         多特征综合重排序
 
@@ -1177,46 +1336,57 @@ class ImageIndexDatabase:
         Returns:
             重排序后的候选列表
         """
-        # 特征权重配置
-        WEIGHTS = {
-            'semantic': 0.6,      # 语义特征权重
-            'color': 0.2,         # 颜色特征权重
-            'brightness': 0.1,    # 亮度特征权重
-            'texture': 0.1,       # 纹理特征权重
-        }
-
-        # 解析查询中的颜色关键词
-        color_keywords = self._extract_color_keywords(text_query)
+        search_intent = search_intent or self._analyze_search_intent(text_query)
+        color_keywords = search_intent['color_keywords']
         brightness_keywords = self._extract_brightness_keywords(text_query)
+        texture_keywords = self._extract_texture_keywords(text_query)
+        has_brightness_intent = any(brightness_keywords.values())
+        has_texture_intent = any(texture_keywords.values())
+        weights = self._feature_weights_for_intent(
+            search_intent,
+            has_brightness_intent,
+            has_texture_intent,
+        )
+        name_bonus_weight = 0.12 if color_keywords else 0.08
 
         for candidate in candidates:
             scores = {
-                'semantic': candidate['semantic_similarity']
+                'semantic': self._clamp01(float(candidate.get('semantic_similarity', 0)))
             }
 
             metadata = candidate['metadata']
 
             # 颜色匹配评分
             if color_keywords:
-                color_score = self._compute_color_match_score(metadata, color_keywords)
+                color_score = self._compute_color_match_score(
+                    metadata,
+                    color_keywords,
+                    background_intent=search_intent.get('background_intent', False),
+                )
                 scores['color'] = color_score
-            else:
-                scores['color'] = 0.5  # 中性分数
 
             # 亮度匹配评分
-            if brightness_keywords:
+            if has_brightness_intent:
                 brightness = metadata.get('brightness', 128)
                 brightness_score = self._compute_brightness_match_score(brightness, brightness_keywords)
                 scores['brightness'] = brightness_score
-            else:
-                scores['brightness'] = 0.5
 
-            # 纹理复杂度评分 (根据查询需求)
-            contrast = metadata.get('contrast', 50)
-            scores['texture'] = min(contrast / 100, 1.0)
+            if has_texture_intent:
+                contrast = metadata.get('contrast', 50)
+                scores['texture'] = self._compute_texture_match_score(contrast, texture_keywords)
 
-            # 计算加权综合得分
-            final_score = sum(WEIGHTS[k] * scores.get(k, 0.5) for k in WEIGHTS)
+            scores['name'] = self._compute_name_match_score(metadata, text_query, search_intent)
+
+            weighted_total = 0.0
+            used_weight = 0.0
+            for key, weight in weights.items():
+                if key not in scores:
+                    continue
+                weighted_total += weight * scores[key]
+                used_weight += weight
+
+            final_score = weighted_total / used_weight if used_weight else scores['semantic']
+            final_score = min(1.0, final_score + name_bonus_weight * scores['name'])
             candidate['final_score'] = final_score
             candidate['score_breakdown'] = scores
 
@@ -1224,30 +1394,72 @@ class ImageIndexDatabase:
         candidates.sort(key=lambda x: x['final_score'], reverse=True)
         return candidates
 
-    def _extract_color_keywords(self, text: str) -> List[str]:
-        """从查询文本中提取颜色关键词"""
-        color_map = {
-            '红': 'red', '红色': 'red',
-            '蓝': 'blue', '蓝色': 'blue',
-            '绿': 'green', '绿色': 'green',
-            '黄': 'yellow', '黄色': 'yellow',
-            '白': 'white', '白色': 'white',
-            '黑': 'black', '黑色': 'black',
-            '橙': 'orange', '橙色': 'orange',
-            '紫': 'purple', '紫色': 'purple',
-            '粉': 'pink', '粉色': 'pink',
-            '灰': 'gray', '灰色': 'gray',
-            '棕': 'brown', '棕色': 'brown',
-            'red': 'red', 'blue': 'blue', 'green': 'green',
-            'yellow': 'yellow', 'white': 'white', 'black': 'black',
-            'orange': 'orange', 'purple': 'purple', 'pink': 'pink',
+    def _analyze_search_intent(self, text: str) -> Dict[str, Any]:
+        """识别查询是否是颜色、背景色或颜色+主体检索。"""
+        color_keywords = self._extract_color_keywords(text)
+        text_lower = text.lower().strip()
+        background_intent = bool(color_keywords) and any(
+            word in text_lower for word in BACKGROUND_QUERY_WORDS
+        )
+
+        remaining = text_lower
+        for color in color_keywords:
+            aliases = sorted(COLOR_SEARCH_ALIASES.get(color, ()), key=len, reverse=True)
+            for alias in aliases:
+                remaining = remaining.replace(alias.lower(), " ")
+
+        filler_words = (
+            "颜色", "彩色", "色", "图片", "照片", "图像", "素材", "搜索",
+            "查找", "找", "一个", "一张", "的", "和", "与", "及", "是",
+            "背景色", "背景", "底色", "底", "photo", "image", "picture",
+        )
+        for word in filler_words:
+            remaining = remaining.replace(word, " ")
+
+        has_non_color_terms = bool("".join(remaining.split()))
+        return {
+            "color_keywords": color_keywords,
+            "background_intent": background_intent,
+            "color_only": bool(color_keywords) and not has_non_color_terms,
+            "has_non_color_terms": has_non_color_terms,
         }
 
+    def _feature_weights_for_intent(self, search_intent: Dict[str, Any],
+                                    has_brightness_intent: bool,
+                                    has_texture_intent: bool) -> Dict[str, float]:
+        """根据查询意图动态分配特征权重。"""
+        if search_intent.get('color_keywords'):
+            if search_intent.get('color_only'):
+                weights = {'semantic': 0.22, 'color': 0.78}
+            elif search_intent.get('background_intent'):
+                weights = {'semantic': 0.30, 'color': 0.70}
+            else:
+                weights = {'semantic': 0.50, 'color': 0.50}
+        else:
+            weights = {'semantic': 1.0}
+
+        if has_brightness_intent:
+            weights = self._add_optional_weight(weights, 'brightness', 0.08)
+        if has_texture_intent:
+            weights = self._add_optional_weight(weights, 'texture', 0.06)
+
+        total = sum(weights.values()) or 1.0
+        return {key: value / total for key, value in weights.items()}
+
+    @staticmethod
+    def _add_optional_weight(weights: Dict[str, float], key: str, weight: float) -> Dict[str, float]:
+        scaled = {name: value * (1.0 - weight) for name, value in weights.items()}
+        scaled[key] = weight
+        return scaled
+
+    def _extract_color_keywords(self, text: str) -> List[str]:
+        """从查询文本中提取颜色关键词"""
+        text_lower = text.lower()
         found_colors = []
-        for cn, en in color_map.items():
-            if cn in text.lower():
-                found_colors.append(en)
-        return list(set(found_colors))
+        for color, aliases in COLOR_SEARCH_ALIASES.items():
+            if any(alias.lower() in text_lower for alias in aliases):
+                found_colors.append(color)
+        return found_colors
 
     def _extract_brightness_keywords(self, text: str) -> Dict[str, bool]:
         """从查询文本中提取亮度关键词"""
@@ -1263,7 +1475,18 @@ class ImageIndexDatabase:
                 result['dark'] = True
         return result
 
-    def _compute_color_match_score(self, metadata: Dict, target_colors: List[str]) -> float:
+    def _extract_texture_keywords(self, text: str) -> Dict[str, bool]:
+        """从查询文本中提取纹理/简洁度关键词。"""
+        text_lower = text.lower()
+        detailed_words = ['纹理', '质感', '细节', '复杂', '清晰', 'texture', 'detailed']
+        simple_words = ['简洁', '干净', '纯色', '平滑', '简单', 'simple', 'clean', 'minimal']
+        return {
+            'detailed': any(word in text_lower for word in detailed_words),
+            'simple': any(word in text_lower for word in simple_words),
+        }
+
+    def _compute_color_match_score(self, metadata: Dict, target_colors: List[str],
+                                   background_intent: bool = False) -> float:
         """计算颜色匹配得分"""
         try:
             dominant_colors_str = metadata.get('dominant_colors', '[]')
@@ -1273,59 +1496,160 @@ class ImageIndexDatabase:
                 dominant_colors = dominant_colors_str
 
             if not dominant_colors:
-                return 0.5
-
-            # 颜色名称到 BGR 范围的映射
-            color_ranges = {
-                'red': [(0, 0, 150), (100, 100, 255)],
-                'blue': [(150, 0, 0), (255, 100, 100)],
-                'green': [(0, 150, 0), (100, 255, 100)],
-                'yellow': [(0, 150, 150), (100, 255, 255)],
-                'white': [(200, 200, 200), (255, 255, 255)],
-                'black': [(0, 0, 0), (50, 50, 50)],
-                'orange': [(0, 100, 200), (100, 180, 255)],
-                'purple': [(150, 0, 150), (255, 100, 255)],
-                'pink': [(150, 150, 200), (255, 200, 255)],
-                'gray': [(100, 100, 100), (180, 180, 180)],
-                'brown': [(0, 50, 100), (100, 150, 180)],
-            }
+                return 0.0
 
             max_score = 0
+            rank_weights = (
+                [1.0, 0.66, 0.44, 0.30, 0.20]
+                if background_intent else
+                [1.0, 0.78, 0.60, 0.45, 0.34]
+            )
             for target_color in target_colors:
-                if target_color not in color_ranges:
-                    continue
-
-                low, high = color_ranges[target_color]
-                for color in dominant_colors[:3]:  # 只检查前3个主色
+                for rank, color in enumerate(dominant_colors[:len(rank_weights)]):
                     if isinstance(color, (list, tuple)) and len(color) >= 3:
-                        b, g, r = color[0], color[1], color[2]
-                        # 检查是否在颜色范围内
-                        if (low[0] <= b <= high[0] and
-                            low[1] <= g <= high[1] and
-                            low[2] <= r <= high[2]):
-                            max_score = max(max_score, 1.0)
-                        else:
-                            # 计算距离得分
-                            dist = sum(abs(color[i] - (low[i] + high[i]) / 2) for i in range(3))
-                            score = max(0, 1 - dist / 400)
-                            max_score = max(max_score, score)
+                        color_score = self._score_bgr_color_against_target(color, target_color)
+                        max_score = max(max_score, color_score * rank_weights[rank])
 
-            return max_score if max_score > 0 else 0.3
+            return self._clamp01(max_score)
 
         except Exception:
-            return 0.5
+            return 0.0
+
+    def _score_bgr_color_against_target(self, bgr_color, target_color: str) -> float:
+        """用 HSV 判断单个 BGR 主色与目标颜色的匹配度。"""
+        b, g, r = [int(np.clip(float(channel), 0, 255)) for channel in bgr_color[:3]]
+        hsv = cv2.cvtColor(np.uint8([[[b, g, r]]]), cv2.COLOR_BGR2HSV)[0][0]
+        hue, saturation, value = [float(v) for v in hsv]
+
+        if target_color == 'white':
+            return self._clamp01((value - 185) / 55) * self._clamp01((55 - saturation) / 55)
+        if target_color == 'black':
+            return self._clamp01((85 - value) / 85)
+        if target_color == 'gray':
+            neutral_score = self._clamp01((65 - saturation) / 65)
+            value_score = 1.0 - min(abs(value - 145) / 145, 1.0)
+            return self._clamp01(neutral_score * value_score)
+
+        hue_rules = {
+            'red': ((0, 179), 13, 45, 45),
+            'orange': ((15,), 15, 50, 55),
+            'yellow': ((30,), 17, 45, 65),
+            'green': ((60,), 24, 42, 45),
+            'aqua': ((90,), 22, 42, 45),
+            'blue': ((108,), 24, 35, 45),
+            'purple': ((138,), 24, 42, 45),
+            'pink': ((165,), 18, 35, 75),
+            'brown': ((14,), 18, 45, 35),
+        }
+        if target_color not in hue_rules:
+            return 0.0
+
+        centers, tolerance, min_saturation, min_value = hue_rules[target_color]
+        hue_score = self._hue_match_score(hue, centers, tolerance)
+        saturation_score = self._clamp01((saturation - min_saturation) / max(1, 140 - min_saturation))
+        value_score = self._clamp01((value - min_value) / max(1, 160 - min_value))
+        score = hue_score * saturation_score * value_score
+
+        if target_color == 'brown':
+            too_bright_penalty = 1.0 - 0.45 * self._clamp01((value - 190) / 65)
+            score *= too_bright_penalty
+
+        return self._clamp01(score)
+
+    @staticmethod
+    def _hue_match_score(hue: float, centers: Tuple[int, ...], tolerance: float) -> float:
+        distances = [min(abs(hue - center), 180 - abs(hue - center)) for center in centers]
+        return max(0.0, 1.0 - min(distances) / tolerance)
+
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        return float(max(0.0, min(1.0, value)))
+
+    def _compute_name_match_score(self, metadata: Dict, text_query: str,
+                                  search_intent: Optional[Dict[str, Any]] = None) -> float:
+        """计算查询词与文件名/路径/显示名的匹配度，支持颜色同义表达。"""
+        searchable = self._searchable_name_text(metadata)
+        if not searchable:
+            return 0.0
+
+        raw_query = text_query.lower().strip()
+        if raw_query and raw_query in searchable:
+            return 1.0
+
+        for term in self._build_name_query_terms(text_query, search_intent):
+            if not term or term == raw_query:
+                continue
+            if term in searchable:
+                if len(term) >= 4:
+                    return 0.96
+                if len(term) >= 2:
+                    return 0.90
+                return 0.78
+
+        return 0.0
+
+    def _searchable_name_text(self, metadata: Dict) -> str:
+        path = str(metadata.get("path", "") or "")
+        name = str(metadata.get("name", "") or "")
+        filename = Path(path).stem if path else ""
+        return " ".join([name, filename, path]).lower()
+
+    def _build_name_query_terms(self, query: str,
+                                search_intent: Optional[Dict[str, Any]] = None) -> List[str]:
+        """生成名称搜索同义词，例如“蓝色证件照”可匹配“蓝底证件照”。"""
+        query_lower = query.lower().strip()
+        search_intent = search_intent or self._analyze_search_intent(query)
+        terms = [query_lower]
+
+        for color in search_intent.get('color_keywords', []):
+            cn = COLOR_PRIMARY_CN.get(color)
+            aliases = COLOR_SEARCH_ALIASES.get(color, ())
+            terms.extend(alias.lower() for alias in aliases)
+
+            if cn:
+                replacements = [
+                    (f"{cn}色", f"{cn}底"),
+                    (f"{cn}色", f"{cn}背景"),
+                    (f"{cn}色", cn),
+                    (f"{cn}背景", f"{cn}底"),
+                ]
+                for source, replacement in replacements:
+                    if source in query_lower:
+                        terms.append(query_lower.replace(source, replacement))
+
+                if "证件照" in query_lower:
+                    terms.extend([f"{cn}底证件照", f"{cn}背景证件照", f"{cn}色证件照"])
+
+        unique_terms = []
+        seen = set()
+        for term in sorted((term.strip() for term in terms), key=len, reverse=True):
+            if not term or term in seen:
+                continue
+            seen.add(term)
+            unique_terms.append(term)
+        return unique_terms
 
     def _compute_brightness_match_score(self, brightness: float,
                                         keywords: Dict[str, bool]) -> float:
         """计算亮度匹配得分"""
+        brightness = float(brightness)
         if keywords.get('bright') and not keywords.get('dark'):
             # 期望亮图像
-            return brightness / 255
+            return self._clamp01(brightness / 255)
         elif keywords.get('dark') and not keywords.get('bright'):
             # 期望暗图像
-            return 1 - brightness / 255
+            return self._clamp01(1 - brightness / 255)
         else:
             return 0.5
+
+    def _compute_texture_match_score(self, contrast: float, keywords: Dict[str, bool]) -> float:
+        """计算纹理/简洁度匹配得分，只在用户明确提及时启用。"""
+        texture_level = self._clamp01(float(contrast) / 110)
+        if keywords.get('detailed') and not keywords.get('simple'):
+            return texture_level
+        if keywords.get('simple') and not keywords.get('detailed'):
+            return 1 - texture_level
+        return 0.5
 
     def _translate_to_english(self, text: str) -> str:
         """
@@ -1515,7 +1839,8 @@ class ImageIndexDatabase:
             匹配的图像列表
         """
         results = []
-        query_lower = query.lower()
+        search_intent = self._analyze_search_intent(query)
+        query_terms = self._build_name_query_terms(query, search_intent)
 
         if self.collection is not None:
             try:
@@ -1536,18 +1861,15 @@ class ImageIndexDatabase:
                             continue
 
                         # 检查名称匹配
-                        name = metadata.get("name", "")
-                        filename = Path(path).stem if path else ""
+                        searchable = self._searchable_name_text(metadata)
+                        match_score = self._compute_name_match_score(metadata, query, search_intent)
 
                         # 在名称、文件名、路径中搜索
-                        if (query_lower in name.lower() or
-                            query_lower in filename.lower() or
-                            query_lower in path.lower()):
-
+                        if match_score > 0 or any(term and term in searchable for term in query_terms):
                             results.append({
                                 "id": image_id,
                                 "path": path,
-                                "similarity": 1.0,  # 名称匹配给高相似度
+                                "similarity": max(match_score, 0.78),
                                 "metadata": metadata
                             })
 
@@ -1569,17 +1891,14 @@ class ImageIndexDatabase:
                 if not path:
                     continue
 
-                name = metadata.get("name", "")
-                filename = Path(path).stem if path else ""
+                searchable = self._searchable_name_text(metadata)
+                match_score = self._compute_name_match_score(metadata, query, search_intent)
 
-                if (query_lower in name.lower() or
-                    query_lower in filename.lower() or
-                    query_lower in path.lower()):
-
+                if match_score > 0 or any(term and term in searchable for term in query_terms):
                     results.append({
                         "id": item["id"],
                         "path": path,
-                        "similarity": 1.0,
+                        "similarity": max(match_score, 0.78),
                         "metadata": metadata
                     })
 

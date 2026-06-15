@@ -274,8 +274,10 @@ class NLPColorParser:
         Args:
             use_llm: 是否使用大模型分析（推荐）
             llm_config: 大模型配置，例如：
-                {"provider": "openai", "api_key": "sk-xxx", "model": "gpt-3.5-turbo"}
-                或 {"provider": "ollama", "model": "qwen2.5:7b"}
+                {"provider": "local", "model_name": "./models/Qwen2.5-1.5B-Instruct"}
+                {"provider": "openai", "api_key_env": "OPENAI_API_KEY", "model": "gpt-4o-mini"}
+                {"provider": "anthropic", "api_key_env": "ANTHROPIC_API_KEY", "model": "claude-3-5-haiku-20241022"}
+                {"provider": "openai-compatible", "base_url": "http://localhost:11434/v1", "model": "qwen2.5:7b"}
         """
         self.text_encoder = None
         self.use_llm = use_llm
@@ -306,35 +308,60 @@ class NLPColorParser:
             self.text_encoder = None
 
     def _init_llm_analyzer(self, llm_config: Dict[str, Any]):
-        """初始化本地大模型分析器"""
+        """根据配置初始化本地或 API 大模型分析器。"""
         try:
-            from .local_llm_analyzer import LocalLLMColorAnalyzer
             from .async_llm_analyzer import AsyncLLMColorAnalyzer
+            from .api_llm_analyzer import APILLMColorAnalyzer, normalize_provider
 
-            model_name = llm_config.get('model_name', 'Qwen/Qwen2.5-1.5B-Instruct')
-            device = llm_config.get('device', 'auto')
+            provider = normalize_provider(llm_config.get('provider', 'local'))
 
-            # 创建本地分析器
-            local_analyzer = LocalLLMColorAnalyzer(
-                model_name=model_name,
-                device=device,
-                quantization_config=llm_config.get('quantization'),
-                max_memory=llm_config.get('max_memory'),
-                offload_folder=llm_config.get('offload_folder'),
-                trust_remote_code=llm_config.get('trust_remote_code', False)
-            )
+            if provider == 'local':
+                from .local_llm_analyzer import LocalLLMColorAnalyzer
+
+                model_name = llm_config.get('model_name', 'Qwen/Qwen2.5-1.5B-Instruct')
+                device = llm_config.get('device', 'auto')
+
+                analyzer = LocalLLMColorAnalyzer(
+                    model_name=model_name,
+                    device=device,
+                    quantization_config=llm_config.get('quantization'),
+                    max_memory=llm_config.get('max_memory'),
+                    offload_folder=llm_config.get('offload_folder'),
+                    trust_remote_code=llm_config.get('trust_remote_code', False)
+                )
+                analyzer_label = f"本地大模型: {model_name}"
+            elif provider in {'openai', 'openai-compatible', 'anthropic'}:
+                analyzer = APILLMColorAnalyzer(
+                    provider=provider,
+                    model=llm_config.get('model') or llm_config.get('model_name'),
+                    api_key=llm_config.get('api_key'),
+                    api_key_env=llm_config.get('api_key_env'),
+                    api_key_required=llm_config.get('api_key_required', True),
+                    base_url=llm_config.get('base_url'),
+                    endpoint=llm_config.get('endpoint'),
+                    timeout=llm_config.get('timeout', 30.0),
+                    temperature=llm_config.get('temperature', 0.65),
+                    max_tokens=llm_config.get('max_tokens', 512),
+                    headers=llm_config.get('headers'),
+                    api_version=llm_config.get('api_version'),
+                    response_format=llm_config.get('response_format'),
+                    extra_body=llm_config.get('extra_body'),
+                )
+                analyzer_label = f"API大模型: {provider}/{analyzer.model}"
+            else:
+                raise ValueError(f"不支持的 LLM provider: {provider}")
 
             # 用异步包装器包装
-            self.llm_analyzer = AsyncLLMColorAnalyzer(local_analyzer)
+            self.llm_analyzer = AsyncLLMColorAnalyzer(analyzer)
 
             if self.llm_analyzer:
-                print(f"✓ 本地大模型已启用（异步模式）: {model_name}")
+                print(f"✓ {analyzer_label} 已启用（异步模式）")
             else:
-                print("✗ 本地模型初始化失败，将使用传统关键词匹配")
+                print("✗ 大模型初始化失败，将使用传统关键词匹配")
                 self.use_llm = False
 
         except Exception as e:
-            print(f"警告: 无法初始化本地大模型: {e}")
+            print(f"警告: 无法初始化大模型: {e}")
             print("  将使用传统关键词匹配")
             self.llm_analyzer = None
             self.use_llm = False
@@ -364,7 +391,10 @@ class NLPColorParser:
         # 优先使用大模型分析
         if self.use_llm and self.llm_analyzer:
             try:
-                result = self.llm_analyzer.analyze(original_text)
+                if hasattr(self.llm_analyzer, "analyze_sync"):
+                    result = self.llm_analyzer.analyze_sync(original_text)
+                else:
+                    result = self.llm_analyzer.analyze(original_text)
 
                 if result.get("is_color_related", False):
                     print(f"[LLM分析] {result.get('reasoning', '无推理信息')}")

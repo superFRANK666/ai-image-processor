@@ -12,7 +12,7 @@
 ### 核心能力 (Current Capabilities)
 本项目已打造出一款**基于端侧 AI 技术**的现代化影像处理软件，集成以下核心能力：
 *   **语义化交互**：集成 **Qwen2.5-1.5B** 本地大模型，通过自然语言直接进行专业级调色（如“调出电影感”、“日系小清新”），支持 4-bit/8-bit 量化运行。
-*   **多维感知 3D化**：基于 **Depth Anything** 与 **MobileSAM** 技术，实现单张 2D 照片到高精度 3D 网格的瞬间转换，支持 360° 交互式查看与深度图可视化。
+*   **多维感知 3D化**：基于 **Depth Anything** 与 **SAM2** 技术，实现单张 2D 照片到高精度 3D 网格的瞬间转换，支持 360° 交互式查看与深度图可视化。
 *   **智能管理**：构建本地海量影像的索引库，支持异步缩略图加载与高性能列表滚动，提供基于语义的图像检索。
 *   **极致性能**：利用延迟加载、图像哈希缓存与智能缩放技术，在普通 PC 上提供流畅的实时响应体验。
 
@@ -35,7 +35,7 @@
     *   **NLP Controller**: `LocalLLMColorAnalyzer` 类封装了 Qwen 模型，支持 System Prompt 定义与 JSON 格式化输出，确保指令执行的准确性。
     *   **Vision Engine**:
         *   **Depth Estimator**: 集成 `Depth Anything` (Transformer) 与 ONNX Runtime 加速。
-        *   **Segmenter**: 集成 `MobileSAM`，支持点选、框选与路径分割，内置图像 Hash 缓存避免重复推理。
+        *   **Segmenter**: 集成 `SAM2`，支持点选、框选与路径分割，内置图像 Hash 与图像 embedding 缓存避免重复推理。
     *   **Performance**: 显存自动管理，支持量化配置 (BitsAndBytes) 与设备自动映射 (CUDA/CPU)。
 
 3.  **持久层与工具**：
@@ -46,7 +46,7 @@
 ```yaml
 AI Core:
   - LLM: Qwen2.5-1.5B-Instruct (Transformers, BitsAndBytes)
-  - Vision: Depth Anything (Depth), MobileSAM (Segmentation)
+  - Vision: Depth Anything (Depth), SAM2 (Segmentation)
   - Inference: PyTorch, ONNX Runtime
   
 System Services:

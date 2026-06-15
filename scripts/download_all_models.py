@@ -6,18 +6,14 @@
 1. 一句话调色大语言模型 (默认 Qwen2.5-1.5B-Instruct，可自定义)
 2. NLP理解模型 (paraphrase-multilingual-MiniLM-L12-v2)
 3. 深度估计模型 (depth-anything-small)
-4. MobileSAM 分割模型
+4. SAM2 物体分割模型
 5. CLIP 多语言文本检索模型
 6. CLIP 图像编码器
-7. SAM2 高精度分割模型 (可选)
 """
 import os
 import sys
 import json
-import hashlib
 import re
-import shutil
-import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -36,80 +32,12 @@ MODELS_DIR = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(exist_ok=True)
 LLM_CONFIG_PATH = PROJECT_ROOT / "llm_config.json"
 
-MOBILE_SAM_SHA256 = "f3c0d8cda613564d499310dab6c812cd80d9de20dd0e7d7b3ea0cd86ff5c76d6"
 DEFAULT_LLM_REPO_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 DEFAULT_LLM_DIR_NAME = "Qwen2.5-1.5B-Instruct"
 KNOWN_LLM_MODEL_ALIASES = {
     "qwen2.5-1.5b-instruct": DEFAULT_LLM_REPO_ID,
     "qwen/qwen2.5-1.5b-instruct": DEFAULT_LLM_REPO_ID,
 }
-
-
-def calculate_sha256(file_path: Path, chunk_size: int = 1024 * 1024) -> str:
-    """计算文件 SHA256。"""
-    digest = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(chunk_size), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def verify_sha256(file_path: Path, expected_sha256: str) -> bool:
-    """校验文件 SHA256。"""
-    actual_sha256 = calculate_sha256(file_path)
-    if actual_sha256.lower() != expected_sha256.lower():
-        print("  ✗ SHA256 校验失败")
-        print(f"    预期: {expected_sha256}")
-        print(f"    实际: {actual_sha256}")
-        return False
-    print(f"  ✓ SHA256 校验通过: {actual_sha256}")
-    return True
-
-
-def download_file_atomic(url: str, output_path: Path, expected_sha256: str = None, stream: bool = True):
-    """下载到临时文件，校验通过后再替换目标文件。"""
-    import requests
-
-    tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-    if tmp_path.exists():
-        tmp_path.unlink()
-
-    response = requests.get(url, timeout=60, stream=stream)
-    response.raise_for_status()
-
-    if stream:
-        total_size = int(response.headers.get('content-length', 0))
-        downloaded = 0
-        with open(tmp_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size > 0:
-                        percent = (downloaded / total_size) * 100
-                        print(f"\r  下载进度: {percent:.1f}%", end='')
-        if total_size > 0:
-            print()
-    else:
-        with open(tmp_path, 'wb') as f:
-            f.write(response.content)
-
-    if expected_sha256 and not verify_sha256(tmp_path, expected_sha256):
-        tmp_path.unlink(missing_ok=True)
-        raise ValueError("下载文件校验失败")
-
-    tmp_path.replace(output_path)
-
-
-def safe_extract_zip(zip_path: Path, target_dir: Path):
-    """安全解压 ZIP，拒绝路径穿越条目。"""
-    target_root = target_dir.resolve()
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        for member in zip_ref.infolist():
-            destination = (target_root / member.filename).resolve()
-            if target_root != destination and target_root not in destination.parents:
-                raise ValueError(f"ZIP 包含非法路径: {member.filename}")
-        zip_ref.extractall(target_root)
 
 
 def prompt_input(prompt: str, default: str = "") -> str:
@@ -150,6 +78,7 @@ def write_llm_config(local_dir: Path):
     """写入一句话调色使用的 LLM 配置。"""
     config = {
         "enabled": True,
+        "provider": "local",
         "model_name": config_model_path(local_dir),
         "device": "auto",
         "trust_remote_code": False,
@@ -279,6 +208,7 @@ def print_manual_llm_download_help(requested_model: str, target_dir: Path, not_f
     print("  下载完成后，可将 llm_config.json 设置为:")
     manual_config = {
         "enabled": True,
+        "provider": "local",
         "model_name": config_model_path(target_dir),
         "device": "auto",
         "trust_remote_code": False,
@@ -371,15 +301,14 @@ print("\n📦 将下载以下模型:")
 print("  [建议] 1. 一句话调色大语言模型 (默认Qwen2.5-1.5B, ~3GB)")
 print("  [必需] 2. NLP理解模型 (~471MB)")
 print("  [必需] 3. 深度估计模型 (~99MB)")
-print("  [必需] 4. MobileSAM分割模型 (~40MB)")
+print("  [必需] 4. SAM2物体分割模型 (~155MB)")
 print("  [必需] 5. CLIP多语言模型 (~540MB)")
 print("  [必需] 6. CLIP图像编码器 (~600MB)")
-print("  [可选] 7. SAM2高精度分割 (~155MB)")
 print("\n⏱️  预计总下载时间: 10-30分钟 (取决于网络速度)")
 print("=" * 80)
 
 # 下载进度统计
-total_models = 7
+total_models = 6
 downloaded_models = 0
 failed_models = []
 
@@ -430,112 +359,47 @@ except Exception as e:
     print(f"  ✗ 下载失败: {e}")
     failed_models.append(("深度估计模型", str(e)))
 
-# 4. 下载MobileSAM权重
+# 4. 下载SAM2物体分割模型
 print("\n" + "=" * 80)
-print("[4/6] 下载MobileSAM权重 (约40MB)...")
+print("[4/6] 下载SAM2物体分割模型 (约155MB)...")
 print("=" * 80)
 try:
-    import requests
+    from huggingface_hub import snapshot_download
+    sam2_dir = MODELS_DIR / "sam2-hiera-tiny"
 
-    sam_dir = MODELS_DIR / "mobile-sam"
-    sam_dir.mkdir(exist_ok=True)
-    sam_file = sam_dir / "mobile_sam.pt"
-
-    if sam_file.exists() and verify_sha256(sam_file, MOBILE_SAM_SHA256):
-        print("  ✓ 模型已存在且校验通过,跳过")
+    has_config = (sam2_dir / "config.json").exists()
+    has_processor = (sam2_dir / "preprocessor_config.json").exists() or (sam2_dir / "processor_config.json").exists()
+    has_weights = any(sam2_dir.glob("*.safetensors")) or any(sam2_dir.glob("*.bin"))
+    if has_config and has_processor and has_weights:
+        print("  ✓ 模型已存在,跳过")
         downloaded_models += 1
     else:
-        if sam_file.exists():
-            print("  ⚠ 已有模型校验失败，将重新下载")
-            sam_file.unlink()
-
-        url = "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt"
-        mirrors = [
-            "https://ghproxy.net/" + url,
-            "https://mirror.ghproxy.com/" + url,
-            url
-        ]
-
-        success = False
-        for mirror in mirrors:
+        last_error = None
+        for endpoint in huggingface_endpoints():
             try:
-                print(f"  尝试从镜像下载: {mirror[:60]}...")
-                download_file_atomic(mirror, sam_file, expected_sha256=MOBILE_SAM_SHA256)
-                print(f"\n  ✓ 下载完成: {sam_file}")
+                print(f"  正在下载: {endpoint}")
+                snapshot_download(
+                    repo_id="facebook/sam2-hiera-tiny",
+                    local_dir=str(sam2_dir),
+                    max_workers=4,
+                    endpoint=endpoint,
+                )
+                print(f"  ✓ 下载完成: {sam2_dir}")
                 downloaded_models += 1
-                success = True
+                last_error = None
                 break
-            except Exception as e:
-                print(f"\n  镜像失败: {e}")
-                continue
-
-        if not success:
-            failed_models.append(("MobileSAM权重", "所有镜像都失败"))
+            except Exception as exc:
+                last_error = exc
+                print(f"  下载源失败: {endpoint} ({exc})")
+        if last_error:
+            raise last_error
 except Exception as e:
     print(f"  ✗ 下载失败: {e}")
-    failed_models.append(("MobileSAM权重", str(e)))
-
-# 4. 下载MobileSAM源码
-print("\n安装MobileSAM源码...")
-try:
-    import requests
-
-    src_dir = PROJECT_ROOT / "src"
-    target_dir = src_dir / "mobile_sam"
-
-    if target_dir.exists():
-        print("  ✓ 源码已存在,跳过")
-    else:
-        zip_url = "https://github.com/ChaoningZhang/MobileSAM/archive/refs/heads/master.zip"
-        mirrors = [
-            "https://ghproxy.net/" + zip_url,
-            "https://mirror.ghproxy.com/" + zip_url,
-            zip_url
-        ]
-
-        temp_zip = PROJECT_ROOT / "mobilesam.zip"
-        temp_extract = PROJECT_ROOT / "mobilesam_temp"
-
-        success = False
-        for mirror in mirrors:
-            try:
-                print(f"  尝试从镜像下载: {mirror[:50]}...")
-                response = requests.get(mirror, timeout=60)
-                response.raise_for_status()
-
-                with open(temp_zip, 'wb') as f:
-                    f.write(response.content)
-
-                # 解压
-                if temp_extract.exists():
-                    shutil.rmtree(temp_extract)
-                temp_extract.mkdir(parents=True, exist_ok=True)
-                safe_extract_zip(temp_zip, temp_extract)
-
-                # 移动文件
-                root_dir = next(temp_extract.glob("MobileSAM-*"), None)
-                if root_dir and (root_dir / "mobile_sam").exists():
-                    shutil.copytree(root_dir / "mobile_sam", target_dir)
-                    print(f"  ✓ 源码安装完成: {target_dir}")
-                    success = True
-                    break
-            except Exception as e:
-                print(f"\n  镜像失败: {e}")
-                continue
-            finally:
-                if temp_zip.exists():
-                    temp_zip.unlink()
-                if temp_extract.exists():
-                    shutil.rmtree(temp_extract)
-
-        if not success:
-            print("  ✗ 所有镜像都失败")
-except Exception as e:
-    print(f"  ✗ 安装失败: {e}")
+    failed_models.append(("SAM2物体分割模型", str(e)))
 
 # 5. 下载多语言CLIP模型
 print("\n" + "=" * 80)
-print("[5/7] 下载多语言CLIP模型 (约540MB)...")
+print("[5/6] 下载多语言CLIP模型 (约540MB)...")
 print("=" * 80)
 try:
     from sentence_transformers import SentenceTransformer
@@ -555,7 +419,7 @@ except Exception as e:
 
 # 6. 下载原始CLIP图像编码器
 print("\n" + "=" * 80)
-print("[6/7] 下载CLIP图像编码器 (约600MB)...")
+print("[6/6] 下载CLIP图像编码器 (约600MB)...")
 print("=" * 80)
 try:
     from sentence_transformers import SentenceTransformer
@@ -572,51 +436,6 @@ try:
 except Exception as e:
     print(f"  ✗ 下载失败: {e}")
     failed_models.append(("CLIP图像编码器", str(e)))
-
-# 7. 下载SAM2高精度分割模型 (可选)
-print("\n" + "=" * 80)
-print("[7/7] 下载SAM2高精度分割模型 (约155MB, 可选)...")
-print("=" * 80)
-print("提示: SAM2精度比MobileSAM高15-20%，但速度略慢")
-user_input = prompt_input("是否下载? (y/n, 默认y): ").strip().lower()
-
-if user_input != 'n':
-    try:
-        # 暂时禁用HF镜像，使用官方源
-        original_endpoint = os.environ.pop('HF_ENDPOINT', None)
-
-        from huggingface_hub import snapshot_download
-        sam2_dir = MODELS_DIR / "sam2-hiera-tiny"
-
-        if sam2_dir.exists():
-            print("  ✓ 模型已存在,跳过")
-            downloaded_models += 1
-        else:
-            print("  正在从HuggingFace官方下载...")
-            snapshot_download(
-                repo_id="facebook/sam2-hiera-tiny",
-                local_dir=str(sam2_dir),
-                local_dir_use_symlinks=False,
-                resume_download=True,
-                max_workers=4
-            )
-            print(f"  ✓ 下载完成: {sam2_dir}")
-            downloaded_models += 1
-
-        # 恢复镜像设置
-        if original_endpoint:
-            os.environ['HF_ENDPOINT'] = original_endpoint
-
-    except Exception as e:
-        print(f"  ✗ 下载失败: {e}")
-        print("  提示: SAM2是可选项，MobileSAM已经足够使用")
-        failed_models.append(("SAM2高精度模型", str(e)))
-        # 恢复镜像设置
-        if original_endpoint:
-            os.environ['HF_ENDPOINT'] = original_endpoint
-else:
-    print("  ⊘ 跳过 SAM2模型下载")
-    total_models -= 1
 
 # 最终统计
 print("\n" + "=" * 80)

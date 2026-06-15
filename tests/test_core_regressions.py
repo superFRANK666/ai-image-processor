@@ -64,6 +64,35 @@ class FakeNewApiSentenceTransformer:
         return np.array([1.0, 0.0, 0.0], dtype=np.float32)
 
 
+class FakeAPIResponse:
+    def __init__(self, payload, status_code=200):
+        self.payload = payload
+        self.status_code = status_code
+        self.text = json.dumps(payload)
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self.payload
+
+
+class FakeAPISession:
+    def __init__(self, payload):
+        self.payload = payload
+        self.requests = []
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        self.requests.append({
+            "url": url,
+            "headers": headers or {},
+            "json": json or {},
+            "timeout": timeout,
+        })
+        return FakeAPIResponse(self.payload)
+
+
 class CoreRegressionTests(unittest.TestCase):
     def test_llm_config_preserves_resource_options(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -71,6 +100,7 @@ class CoreRegressionTests(unittest.TestCase):
             config_path.write_text(
                 json.dumps({
                     "enabled": True,
+                    "provider": "local",
                     "model_name": "local-model",
                     "device": "cuda",
                     "quantization": {"enabled": True, "bits": 4},
@@ -84,10 +114,104 @@ class CoreRegressionTests(unittest.TestCase):
             config = load_llm_config(str(config_path))
 
         self.assertTrue(config["enabled"])
+        self.assertEqual(config["provider"], "local")
         self.assertEqual(config["quantization"]["bits"], 4)
         self.assertEqual(config["max_memory"]["0"], "8GB")
         self.assertEqual(config["offload_folder"], "./offload")
         self.assertTrue(config["trust_remote_code"])
+
+    def test_llm_config_supports_openai_compatible_api_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "llm_config.json"
+            config_path.write_text(
+                json.dumps({
+                    "enabled": True,
+                    "provider": "openai_compatible",
+                    "model": "qwen2.5:7b",
+                    "base_url": "http://localhost:11434/v1",
+                    "api_key_required": False,
+                    "temperature": "0.2",
+                    "max_tokens": "256",
+                    "extra_body": {"top_p": 0.9},
+                }),
+                encoding="utf-8",
+            )
+
+            config = load_llm_config(str(config_path))
+
+        self.assertTrue(config["enabled"])
+        self.assertEqual(config["provider"], "openai-compatible")
+        self.assertEqual(config["model"], "qwen2.5:7b")
+        self.assertEqual(config["base_url"], "http://localhost:11434/v1")
+        self.assertFalse(config["api_key_required"])
+        self.assertEqual(config["temperature"], 0.2)
+        self.assertEqual(config["max_tokens"], 256)
+        self.assertEqual(config["extra_body"]["top_p"], 0.9)
+
+    def test_api_llm_analyzer_uses_openai_chat_completion_format(self):
+        from src.ai.api_llm_analyzer import APILLMColorAnalyzer
+
+        session = FakeAPISession({
+            "choices": [{
+                "message": {
+                    "content": json.dumps({
+                        "is_color_related": True,
+                        "reasoning": "需要暖色高光",
+                        "parameters": {"temperature": 18, "highlight_saturation": 20},
+                    })
+                }
+            }]
+        })
+        analyzer = APILLMColorAnalyzer(
+            provider="openai",
+            model="test-openai-model",
+            api_key="test-key",
+            session=session,
+            timeout=12,
+        )
+
+        result = analyzer.analyze("夕阳电影感")
+
+        self.assertTrue(result["is_color_related"])
+        self.assertEqual(result["parameters"]["temperature"], 18)
+        request = session.requests[0]
+        self.assertEqual(request["url"], "https://api.openai.com/v1/chat/completions")
+        self.assertEqual(request["headers"]["Authorization"], "Bearer test-key")
+        self.assertEqual(request["json"]["model"], "test-openai-model")
+        self.assertEqual(request["json"]["messages"][0]["role"], "system")
+        self.assertEqual(request["json"]["messages"][1]["role"], "user")
+        self.assertEqual(request["timeout"], 12)
+
+    def test_api_llm_analyzer_uses_anthropic_messages_format(self):
+        from src.ai.api_llm_analyzer import APILLMColorAnalyzer
+
+        session = FakeAPISession({
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "is_color_related": True,
+                    "reasoning": "蓝色通透",
+                    "parameters": {"blue_saturation": 28, "dehaze": 16},
+                }),
+            }]
+        })
+        analyzer = APILLMColorAnalyzer(
+            provider="anthropic",
+            model="test-anthropic-model",
+            api_key="anthropic-key",
+            session=session,
+        )
+
+        result = analyzer.analyze("天空更蓝更通透")
+
+        self.assertEqual(result["parameters"]["blue_saturation"], 28)
+        request = session.requests[0]
+        self.assertEqual(request["url"], "https://api.anthropic.com/v1/messages")
+        self.assertEqual(request["headers"]["x-api-key"], "anthropic-key")
+        self.assertIn("anthropic-version", request["headers"])
+        self.assertEqual(request["json"]["model"], "test-anthropic-model")
+        self.assertIn("system", request["json"])
+        self.assertEqual(request["json"]["messages"][0]["role"], "user")
 
     def test_unicode_image_io_roundtrip_and_invalid_extension(self):
         image = np.full((4, 5, 3), 127, dtype=np.uint8)
@@ -267,6 +391,60 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(faces.dtype, np.int32)
         self.assertEqual(faces[:2].tolist(), [[0, 4, 1], [1, 4, 5]])
 
+    def test_model_download_specs_use_sam2_as_only_segmenter(self):
+        from src.core.model_downloads import get_model_specs
+
+        specs = get_model_specs()
+        keys = {spec.key for spec in specs}
+
+        self.assertIn("sam2_segmenter", keys)
+        self.assertTrue(all("mobile" not in spec.key.casefold() for spec in specs))
+        self.assertTrue(all("mobile" not in spec.role_title.casefold() for spec in specs))
+
+    def test_incomplete_sam2_cache_is_not_treated_as_downloaded(self):
+        from src.core.model_downloads import hf_snapshot_ready
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "sam2-hiera-tiny"
+            cache_dir = model_dir / ".cache" / "huggingface"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / "CACHEDIR.TAG").write_text("cache", encoding="utf-8")
+
+            self.assertFalse(hf_snapshot_ready(model_dir))
+
+            (model_dir / "config.json").write_text("{}", encoding="utf-8")
+            (model_dir / "preprocessor_config.json").write_text("{}", encoding="utf-8")
+            (model_dir / "model.safetensors").write_bytes(b"weights")
+
+            self.assertTrue(hf_snapshot_ready(model_dir))
+
+    def test_model_cleanup_rejects_paths_outside_models_dir(self):
+        from src.core.model_downloads import MODELS_DIR, clear_model_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outside_model = Path(tmp) / "outside-model"
+            outside_model.mkdir()
+
+            with self.assertRaisesRegex(ValueError, "models"):
+                clear_model_path(outside_model)
+
+        with self.assertRaisesRegex(ValueError, "models"):
+            clear_model_path(MODELS_DIR)
+
+    def test_sam2_segmenter_selects_highest_scored_mask(self):
+        from src.ai.agi_camera import ObjectSegmenter
+
+        masks = np.zeros((1, 3, 4, 4), dtype=np.float32)
+        masks[0, 0] = 0.1
+        masks[0, 1] = 0.7
+        masks[0, 2] = 0.3
+        scores = np.array([[[0.2, 0.9, 0.4]]], dtype=np.float32)
+
+        selected = ObjectSegmenter._select_best_mask([masks], scores)
+
+        self.assertEqual(selected.shape, (4, 4))
+        self.assertTrue(np.allclose(selected, 0.7))
+
     def test_clip_model_init_restores_offline_environment(self):
         original_cls = image_retrieval_module.SentenceTransformer
         original_hf = os.environ.get("HF_HUB_OFFLINE")
@@ -383,6 +561,146 @@ class CoreRegressionTests(unittest.TestCase):
 
         self.assertEqual(results, [])
         self.assertEqual(db.collection.query_calls, 1)
+
+    def test_color_match_uses_hsv_and_dominant_rank(self):
+        db = object.__new__(ImageIndexDatabase)
+        blue_background = {
+            "dominant_colors": json.dumps([
+                [197, 118, 68],
+                [25, 27, 28],
+                [53, 72, 98],
+            ])
+        }
+        student_card = {
+            "dominant_colors": json.dumps([
+                [253, 253, 253],
+                [64, 50, 52],
+                [12, 11, 11],
+                [170, 170, 180],
+                [29, 30, 209],
+            ])
+        }
+
+        blue_score = db._compute_color_match_score(blue_background, ["blue"])
+        student_score = db._compute_color_match_score(student_card, ["blue"])
+
+        self.assertGreater(blue_score, 0.8)
+        self.assertLess(student_score, 0.15)
+
+    def test_color_only_query_prioritizes_actual_color_over_texture(self):
+        db = object.__new__(ImageIndexDatabase)
+        candidates = [
+            {
+                "id": "student-card",
+                "path": "C:/tmp/学生证.jpg",
+                "semantic_similarity": 0.214,
+                "metadata": {
+                    "path": "C:/tmp/学生证.jpg",
+                    "dominant_colors": json.dumps([
+                        [253, 253, 253],
+                        [64, 50, 52],
+                        [12, 11, 11],
+                        [170, 170, 180],
+                        [29, 30, 209],
+                    ]),
+                    "brightness": 208.7,
+                    "contrast": 84.0,
+                },
+            },
+            {
+                "id": "blue-id-photo",
+                "path": "C:/tmp/蓝底证件照.jpg",
+                "semantic_similarity": 0.215,
+                "metadata": {
+                    "path": "C:/tmp/蓝底证件照.jpg",
+                    "dominant_colors": json.dumps([
+                        [197, 118, 68],
+                        [25, 27, 28],
+                        [53, 72, 98],
+                        [107, 129, 156],
+                    ]),
+                    "brightness": 96.2,
+                    "contrast": 46.0,
+                },
+            },
+        ]
+
+        ranked = db._multi_feature_rerank(candidates, "蓝色", np.array([], dtype=np.float32))
+
+        self.assertEqual(ranked[0]["id"], "blue-id-photo")
+        self.assertGreater(ranked[0]["final_score"], ranked[1]["final_score"] + 0.5)
+
+    def test_color_name_search_expands_background_aliases(self):
+        class FakeCollection:
+            def get(self, include=None):
+                return {
+                    "ids": ["blue", "red"],
+                    "metadatas": [
+                        {"path": "C:/tmp/蓝底证件照.jpg"},
+                        {"path": "C:/tmp/红底证件照.jpg"},
+                    ],
+                }
+
+        db = object.__new__(ImageIndexDatabase)
+        db.collection = FakeCollection()
+
+        results = db.search_by_name("蓝色证件照", top_k=5)
+
+        self.assertEqual([item["id"] for item in results], ["blue"])
+        self.assertGreaterEqual(results[0]["similarity"], 0.9)
+
+    def test_text_search_merges_color_metadata_candidates(self):
+        student_metadata = {
+            "path": "C:/tmp/student-card.jpg",
+            "embedding_backend": "clip_image",
+            "dominant_colors": json.dumps([
+                [253, 253, 253],
+                [64, 50, 52],
+                [12, 11, 11],
+            ]),
+            "brightness": 208.7,
+            "contrast": 84.0,
+        }
+        blue_metadata = {
+            "path": "C:/tmp/plain-reference.jpg",
+            "embedding_backend": "clip_image",
+            "dominant_colors": json.dumps([
+                [197, 118, 68],
+                [25, 27, 28],
+            ]),
+            "brightness": 96.2,
+            "contrast": 46.0,
+        }
+
+        class FakeCollection:
+            def get(self, include=None):
+                return {
+                    "ids": ["student", "blue"],
+                    "metadatas": [student_metadata, blue_metadata],
+                }
+
+            def query(self, *args, **kwargs):
+                return {
+                    "ids": [["student"]],
+                    "metadatas": [[student_metadata]],
+                    "distances": [[0.786]],
+                    "embeddings": [[[1.0, 0.0, 0.0]]],
+                }
+
+        db = object.__new__(ImageIndexDatabase)
+        db.collection = FakeCollection()
+        db.feature_extractor = SimpleNamespace(
+            model=FakeClipModel(),
+            image_model=object(),
+            _model_init_attempted=True,
+            _is_multilingual=True,
+        )
+        db._text_index_backend_checked = False
+
+        results = ImageIndexDatabase.search_by_text(db, "蓝色", top_k=1)
+
+        self.assertEqual([item["id"] for item in results], ["blue"])
+        self.assertEqual(results[0]["match_type"], "metadata_color")
 
     def test_memory_index_filters_group_markers_consistently(self):
         db = object.__new__(ImageIndexDatabase)

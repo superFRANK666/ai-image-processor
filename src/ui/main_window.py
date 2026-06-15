@@ -29,6 +29,7 @@ from .library_manager_dialog import LibraryManagerDialog
 from .image_picker_dialog import pick_images
 from .command_palette import CommandDefinition, CommandPalette
 from .font_utils import apply_application_font
+from .model_config_dialog import ModelConfigDialog
 from .style_sheet import get_dark_style
 from .workflow_panel import WorkflowMetrics, WorkflowPanel
 
@@ -579,12 +580,18 @@ class MainWindow(QMainWindow):
         manage_library_action.triggered.connect(self.open_library_manager)
         view_menu.addAction(manage_library_action)
 
-        # 帮助菜单
-        help_menu = menubar.addMenu("帮助(&H)")
+        # 设置菜单
+        self.settings_menu = menubar.addMenu("设置(&S)")
+
+        model_config_action = QAction("模型配置", self)
+        model_config_action.triggered.connect(self.open_model_config)
+        self.settings_menu.addAction(model_config_action)
+
+        self.settings_menu.addSeparator()
 
         about_action = QAction("关于", self)
         about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
+        self.settings_menu.addAction(about_action)
 
     def _setup_toolbar(self):
         """设置工具栏"""
@@ -914,6 +921,11 @@ class MainWindow(QMainWindow):
         palette = CommandPalette(self._build_command_definitions(), self)
         palette.focus_search()
         palette.exec()
+
+    def open_model_config(self):
+        """打开模型配置窗口。"""
+        dialog = ModelConfigDialog(self)
+        dialog.exec()
 
     def _build_command_definitions(self):
         """根据当前上下文生成命令面板条目。"""

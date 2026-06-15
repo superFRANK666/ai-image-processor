@@ -1,3 +1,13 @@
+## Unreleased
+
+- Added API-backed LLM support for the natural-language color workflow, including OpenAI, Anthropic, and OpenAI-compatible chat-completions providers.
+- Extended `llm_config.json` with explicit `provider` selection while preserving backward compatibility for existing local model configs.
+- Replaced the object segmentation backend with SAM2 for point, box, and path selection workflows.
+- Added SAM2 model download/configuration support and removed the vendored legacy segmentation source tree.
+- Updated model documentation and dependency requirements for the SAM2-based workflow.
+- Improved image-library text search with intent-aware color/background scoring, filename alias expansion, and metadata fallback recall for color-heavy queries.
+- Tidied repository hygiene documentation around ignored local assets such as `data/`, `models/`, `artifacts/`, and Python cache directories.
+
 ## v1.2.0 - Product UI Platform Upgrade
 
 - Added a modern command center, canvas HUD, processing overlay, drag/drop import affordances, and Ctrl+K command palette.

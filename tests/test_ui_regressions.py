@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -11,9 +12,13 @@ import cv2
 import numpy as np
 
 try:
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication, QCheckBox, QFrame, QLabel, QLineEdit, QMessageBox
 except ImportError:  # pragma: no cover - optional GUI dependency may be absent in slim envs
     QApplication = None
+    QCheckBox = None
+    QFrame = None
+    QLabel = None
+    QLineEdit = None
     QMessageBox = None
 
 
@@ -1354,6 +1359,77 @@ class ColorPanelRegressionTests(unittest.TestCase):
             fake_window.statusbar.messages[-1],
             ("参考图片分析失败: index offline", 5000),
         )
+
+    def test_model_cleanup_dialog_uses_obvious_checkmark_feedback(self):
+        from src.core.model_downloads import DownloadedModel
+        from src.ui.model_config_dialog import ModelCleanupDialog
+
+        item = DownloadedModel(
+            key="local::fake-model",
+            role_title="测试本地模型",
+            model_name="fake-model",
+            path=Path.cwd() / "models" / "fake-model",
+            status="本地存在",
+            known=False,
+        )
+        dialog = ModelCleanupDialog([item])
+        self.addCleanup(dialog.close)
+
+        checkbox = dialog.findChild(QCheckBox, "cleanupModelCheck")
+        row = dialog.findChild(QFrame, "cleanupModelRow")
+
+        self.assertIsNotNone(checkbox)
+        self.assertIsNotNone(row)
+        self.assertFalse(dialog.delete_button.isEnabled())
+        self.assertEqual(dialog.selected_paths(), [])
+        self.assertFalse(checkbox.text().startswith("✓ "))
+
+        checkbox.setChecked(True)
+
+        self.assertTrue(dialog.delete_button.isEnabled())
+        self.assertTrue(checkbox.text().startswith("✓ "))
+        self.assertTrue(row.property("checked"))
+        self.assertEqual(dialog.selected_paths(), [item.path])
+
+    def test_model_config_dialog_saves_api_llm_provider_config(self):
+        from src.ui.model_config_dialog import ModelConfigDialog
+
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        config_path = Path(temp_dir.name) / "llm_config.json"
+        dialog = ModelConfigDialog(llm_config_path=config_path)
+        self.addCleanup(dialog.close)
+
+        dialog._provider_radios["openai-compatible"].setChecked(True)
+        self.assertIsNone(dialog.findChild(QLineEdit, "apiKeyEnvInput"))
+        self.assertIsNone(dialog.findChild(QCheckBox, "apiKeyRequiredCheck"))
+        self.assertIn("模型名称", [label.text() for label in dialog.findChildren(QLabel)])
+        self.assertEqual(dialog.api_model_input.placeholderText(), "")
+        self.assertEqual(dialog.api_base_url_input.placeholderText(), "")
+        self.assertEqual(dialog.api_key_input.placeholderText(), "")
+        self.assertEqual(dialog.api_model_input.text(), "")
+        self.assertEqual(dialog.api_base_url_input.text(), "")
+
+        dialog.api_model_input.setText("studio-router-model")
+        dialog.api_base_url_input.setText("https://llm-gateway.example.com/v1")
+        dialog.api_timeout_input.setText("45")
+        dialog.api_temperature_input.setText("0.3")
+        dialog.api_max_tokens_input.setText("384")
+
+        with mock.patch("src.ui.model_config_dialog.QMessageBox.information") as information:
+            dialog._save_llm_runtime_config()
+
+        information.assert_called_once()
+        saved = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["provider"], "openai-compatible")
+        self.assertEqual(saved["model"], "studio-router-model")
+        self.assertEqual(saved["base_url"], "https://llm-gateway.example.com/v1")
+        self.assertNotIn("api_key_env", saved)
+        self.assertFalse(saved["api_key_required"])
+        self.assertEqual(saved["timeout"], 45.0)
+        self.assertEqual(saved["temperature"], 0.3)
+        self.assertEqual(saved["max_tokens"], 384)
+        self.assertNotIn("api_key", saved)
 
     def test_text_command_success_auto_applies_llm_params(self):
         from src.ai.color_params import ColorGradingParams

@@ -9,6 +9,9 @@ def __getattr__(name):
     if name == 'NLPColorParser':
         from .nlp_color_parser import NLPColorParser
         return NLPColorParser
+    elif name == 'APILLMColorAnalyzer':
+        from .api_llm_analyzer import APILLMColorAnalyzer
+        return APILLMColorAnalyzer
     elif name == 'ColorGradingParams':
         # 优先从轻量模块导入，不触发 numpy/sentence_transformers
         from .color_params import ColorGradingParams
@@ -54,6 +57,7 @@ def __getattr__(name):
 
 __all__ = [
     'NLPColorParser',
+    'APILLMColorAnalyzer',
     'ColorGradingParams',
     'ColorGradingEngine',
     'ImageFeatureExtractor',
